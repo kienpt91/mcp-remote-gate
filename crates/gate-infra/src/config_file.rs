@@ -242,7 +242,7 @@ pub fn parse_config(text: &str) -> Result<Config, Vec<String>> {
 
 fn resolve(base: &Path, path: &str) -> String {
     let p = Path::new(path);
-    if p.is_absolute() {
+    if p.is_absolute() || base == Path::new(".") {
         path.to_string()
     } else {
         base.join(p).to_string_lossy().into_owned()
