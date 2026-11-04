@@ -8,6 +8,7 @@
 pub mod args;
 mod check;
 mod init;
+mod selftest;
 mod serve;
 mod token;
 mod tools;
@@ -90,6 +91,7 @@ pub fn run(args: &[String], io: &mut Io<'_>) -> i32 {
         "check" => check::run(rest, io),
         "tools" => tools::run(rest, io),
         "token" => token::run(rest, io),
+        "selftest" => selftest::run(rest, io),
         "init" => init::run(rest, io),
         "version" | "--version" | "-V" => {
             let _ = writeln!(io.out, "mcp-remote-gate {VERSION}");
