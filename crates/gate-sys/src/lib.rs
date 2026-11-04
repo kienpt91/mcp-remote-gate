@@ -40,6 +40,15 @@ impl Signal {
     }
 }
 
+/// The `open` flag that makes opening a symbolic link an error (`O_NOFOLLOW`).
+pub const NOFOLLOW: i32 = libc::O_NOFOLLOW;
+
+/// The effective user id of this process.
+pub fn effective_uid() -> u32 {
+    // SAFETY: geteuid takes no arguments, touches no memory and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
 /// Arranges for `cmd` to start in a process group of its own (so that the whole tree can be
 /// signalled), with `limits` applied before it runs and, on Linux, with a kill signal when the
 /// gateway thread that started it ends.
@@ -360,6 +369,41 @@ mod tests {
             has_exited(quick.id()).is_err(),
             "once reaped there is nothing to ask about"
         );
+    }
+
+    #[test]
+    fn the_effective_uid_is_the_one_of_files_we_create() {
+        use std::os::unix::fs::MetadataExt;
+        let path = std::env::temp_dir().join(format!("gate-sys-uid-{}", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let owner = std::fs::metadata(&path).unwrap().uid();
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(owner, effective_uid());
+    }
+
+    #[test]
+    fn opening_a_symlink_with_the_flag_fails() {
+        use std::os::unix::fs::{symlink, OpenOptionsExt};
+        let dir = std::env::temp_dir().join(format!("gate-sys-nofollow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("target"), b"x").unwrap();
+        symlink(dir.join("target"), dir.join("link")).unwrap();
+        let plain = std::fs::OpenOptions::new()
+            .read(true)
+            .open(dir.join("link"));
+        let flagged = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(NOFOLLOW)
+            .open(dir.join("link"));
+        let regular = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(NOFOLLOW)
+            .open(dir.join("target"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(plain.is_ok());
+        assert!(flagged.is_err(), "the link must not be followed");
+        assert!(regular.is_ok());
     }
 
     #[test]
