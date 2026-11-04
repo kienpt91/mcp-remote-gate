@@ -5,3 +5,4 @@
 pub mod glob;
 pub mod hash;
 pub mod json;
+pub mod jsonrpc;
