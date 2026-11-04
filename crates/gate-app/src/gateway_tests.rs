@@ -946,3 +946,26 @@ fn property_arbitrary_bodies_never_crash_and_never_reach_the_server_by_accident(
         }
     }
 }
+
+#[test]
+fn bidi_and_zero_width_characters_in_a_method_or_tool_name_do_not_reach_the_audit_file_raw() {
+    let r = rig();
+    let method = rpc(1, "x\\u202eevil\\u009b\\u200b", "{}");
+    r.gateway.handle(&post(Some(&r.full_token), &method));
+    let tool = call("get_chats\\u200b", "{}");
+    let resp = r.gateway.handle(&post(Some(&r.full_token), &tool));
+    assert_eq!(
+        error_code(&resp),
+        jsonrpc::INVALID_PARAMS,
+        "a tool name with an invisible character is not a valid name"
+    );
+    assert!(r.upstream.calls().is_empty());
+    for rec in r.audit.records() {
+        let line = rec.to_line();
+        assert!(
+            !line.contains('\u{202e}') && !line.contains('\u{9b}') && !line.contains('\u{200b}'),
+            "{line}"
+        );
+    }
+    assert_eq!(r.audit.records().len(), 2);
+}

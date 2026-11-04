@@ -3,7 +3,7 @@
 //! it leaves.
 
 use crate::json::Value;
-use crate::sanitize::truncate_chars;
+use crate::sanitize::{is_invisible_or_control, truncate_chars};
 
 /// The protocol version the gateway offers to the upstream server. The server answers with the
 /// version it speaks and the gateway repeats that answer to its clients.
@@ -120,7 +120,9 @@ pub fn parse_call_params(params: Option<&Value>) -> Result<CallParams<'_>, &'sta
         .ok_or("params.name must be a string")?;
     if name.is_empty()
         || name.chars().count() > MAX_TOOL_NAME_CHARS
-        || name.chars().any(char::is_control)
+        || name
+            .chars()
+            .any(|c| c.is_whitespace() || is_invisible_or_control(c))
     {
         return Err("params.name is not a valid tool name");
     }
@@ -352,6 +354,29 @@ mod tests {
             long_name.as_str(),
         ] {
             assert!(parse_call_params(Some(&json(bad))).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn tool_names_with_whitespace_or_invisible_characters_are_refused() {
+        for bad in [
+            " send_message",
+            "send_message ",
+            "send message",
+            "send_message\\u200b",
+            "\\u202esend_message",
+            "send_\\u00admessage",
+            "send_message\\u2060",
+            "send_message\\u0085",
+            "send_message\\ufeff",
+            "\\udb40\\udc41send_message",
+        ] {
+            let p = json(&format!("{{\"name\":\"{bad}\"}}"));
+            assert!(parse_call_params(Some(&p)).is_err(), "{bad}");
+        }
+        for ok in ["send_message", "a.b-c_d", "Tool123", "é"] {
+            let p = json(&format!("{{\"name\":\"{ok}\"}}"));
+            assert!(parse_call_params(Some(&p)).is_ok(), "{ok}");
         }
     }
 
