@@ -158,13 +158,13 @@ mod tests {
         let engaged = FileKillSwitch::new(Some(path), false).engaged();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
         // running as root bypasses the permission, then the file is simply absent
-        if std::fs::read_dir(&locked).is_ok() && unsafe_free_is_root() {
+        if std::fs::read_dir(&locked).is_ok() && running_as_root() {
             return;
         }
         assert!(engaged);
     }
 
-    fn unsafe_free_is_root() -> bool {
+    fn running_as_root() -> bool {
         std::fs::read_to_string("/proc/self/status")
             .is_ok_and(|s| s.lines().any(|l| l.starts_with("Uid:\t0\t")))
     }
