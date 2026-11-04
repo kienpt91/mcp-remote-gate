@@ -9,6 +9,9 @@ pub const MAX_FIELD_CHARS: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
+    /// An allowed tool call is about to reach the server. Written before it does, so that a crash
+    /// or a power cut during the call still leaves a record; the completion record follows.
+    Started,
     /// The request was served.
     Allowed,
     /// The gateway refused it.
@@ -20,6 +23,7 @@ pub enum Outcome {
 impl Outcome {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Outcome::Started => "started",
             Outcome::Allowed => "allowed",
             Outcome::Denied => "denied",
             Outcome::Error => "error",
@@ -228,6 +232,7 @@ mod tests {
 
     #[test]
     fn outcome_names() {
+        assert_eq!(Outcome::Started.as_str(), "started");
         assert_eq!(Outcome::Allowed.as_str(), "allowed");
         assert_eq!(Outcome::Denied.as_str(), "denied");
         assert_eq!(Outcome::Error.as_str(), "error");
