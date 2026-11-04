@@ -3,3 +3,4 @@
 //! processes, no clock and no randomness. Time and entropy arrive through arguments.
 
 pub mod hash;
+pub mod json;
