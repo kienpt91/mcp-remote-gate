@@ -3,3 +3,4 @@
 //! traits of [`ports`]: it opens no file, socket or process and reads no clock of its own.
 
 pub mod ports;
+pub mod upstream;
