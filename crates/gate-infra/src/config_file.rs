@@ -2,7 +2,7 @@
 //! configuration (unknown keys and wrong types are errors, never ignored) and the resolution of
 //! relative paths against the directory of the file.
 
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::Path;
 
 use gate_domain::config::{
@@ -249,6 +249,18 @@ fn resolve(base: &Path, path: &str) -> String {
     }
 }
 
+/// Root may own a configuration (system-wide setups); otherwise the owner must be the user the
+/// gateway runs as, because whoever owns the file can change the tool policy.
+fn owner_is_acceptable(file_uid: u32, current_uid: u32) -> bool {
+    file_uid == current_uid || file_uid == 0
+}
+
+/// Whether others could replace or edit `dir`'s entries: group or other write permission, without
+/// the sticky bit that restricts it to the owners of the entries.
+fn directory_is_open_to_others(mode: u32) -> bool {
+    mode & 0o022 != 0 && mode & 0o1000 == 0
+}
+
 /// Reads, checks and validates the configuration file at `path`. Relative paths of the audit
 /// log, the kill switch file, the working directory and a relative program (`./server`) are
 /// taken relative to the directory of the file.
@@ -263,6 +275,30 @@ pub fn load(path: &Path) -> Result<Config, Vec<String>> {
             "{} can be written by other users: anyone who can edit it can widen the tool policy; run chmod go-w on it",
             path.display()
         )]);
+    }
+    if !owner_is_acceptable(meta.uid(), gate_sys::effective_uid()) {
+        return Err(vec![format!(
+            "{} belongs to another user (uid {}): only the user that runs the gateway, or root, may own its configuration",
+            path.display(),
+            meta.uid()
+        )]);
+    }
+    // the directory of the real file: whoever can write there can swap the file for another one
+    let real = std::fs::canonicalize(path)
+        .map_err(|e| vec![format!("cannot resolve {}: {e}", path.display())])?;
+    if let Some(parent) = real.parent() {
+        let dir = std::fs::metadata(parent).map_err(|e| {
+            vec![format!(
+                "cannot read the directory {}: {e}",
+                parent.display()
+            )]
+        })?;
+        if directory_is_open_to_others(dir.permissions().mode()) {
+            return Err(vec![format!(
+                "the directory {} can be written by other users: they could replace the configuration; run chmod go-w on it",
+                parent.display()
+            )]);
+        }
     }
     if meta.len() > toml::MAX_BYTES as u64 {
         return Err(vec![format!(
@@ -545,6 +581,53 @@ tools = ["get_*"]
         assert!(
             load(&path).is_ok(),
             "readable by others is fine: the file holds only hashes"
+        );
+    }
+
+    #[test]
+    fn a_directory_that_others_can_write_is_refused() {
+        let dir = TempDir::new("cfgdir");
+        let path = dir.write("gate.toml", &full_text());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for mode in [0o777, 0o775, 0o757] {
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+            let e = load(&path).unwrap_err();
+            assert!(
+                e[0].contains("directory") && e[0].contains("can be written by other users"),
+                "{mode:o}: {e:?}"
+            );
+        }
+        // a sticky directory (like /tmp) does not let others replace files they do not own
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o1777)).unwrap();
+        assert!(load(&path).is_ok());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(load(&path).is_ok());
+    }
+
+    #[test]
+    fn a_symbolic_link_to_a_good_file_is_judged_by_the_file_it_points_to() {
+        let dir = TempDir::new("cfglink");
+        let real = dir.write("real.toml", &full_text());
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let link = dir.join("gate.toml");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(load(&link).is_ok());
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(load(&link).unwrap_err()[0].contains("can be written by other users"));
+    }
+
+    #[test]
+    fn who_may_own_the_configuration() {
+        assert!(owner_is_acceptable(1000, 1000));
+        assert!(
+            owner_is_acceptable(0, 1000),
+            "root owns system-wide configuration"
+        );
+        assert!(owner_is_acceptable(0, 0));
+        assert!(!owner_is_acceptable(1001, 1000));
+        assert!(
+            !owner_is_acceptable(1000, 0),
+            "root does not run a configuration somebody else owns"
         );
     }
 
