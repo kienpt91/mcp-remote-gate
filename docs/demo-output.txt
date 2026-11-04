@@ -5,7 +5,7 @@ token: mrg_<the token, masked in this recording>
 
 [[token]]
 id = "desktop"
-hash = "sha256:155696d54d386716f929567457d1d50883cd04218ce295537128f6f16d663b37"
+hash = "sha256:2ef3d891a4e7d8bf2f8475161975d27f90cd5d746439a6cba3ffb52ee898ebc4"
 scopes = ["tools:list", "tools:call"]
 The token above is shown once and stored nowhere. Give it to the client; paste the [[token]] block (it holds only the hash) into gate.toml.
 
@@ -22,7 +22,7 @@ child env:   inherits PATH; sets FAKE_MCP_SENT_LOG
 tools:       read_only = true
   allow:     *
   deny:      none
-  reads:     get_*, list_*, read_*, search_*, find_*, fetch_*, describe_*, query_*, show_*, view_*, count_*, lookup_*
+  reads:     get_*, list_*, read_*, search_*, find_*, describe_*, show_*, view_*, count_*, lookup_*
   arg rules: 0
 limits:      120 requests/min per token (burst 20), 1048576 bytes per request, 16 calls in flight
 results:     not capped
@@ -31,7 +31,7 @@ token:       desktop (tools:list, tools:call)
 
 # 3. Ask the real server which tools it has, and see which ones the policy lets through.
 $ mcp-remote-gate tools --config gate.toml
-2026-11-04T14:25:47.684Z INFO upstream server ready: fake-whatsapp 0.1.0 (protocol 2025-06-18)
+2026-11-04T15:10:15.003Z INFO upstream server ready: fake-whatsapp 0.1.0 (protocol 2025-06-18)
 server: fake-whatsapp 0.1.0 (protocol 2025-06-18)
 policy: read_only = true, allow = 1, deny = 0
   list_chats       exposed
@@ -74,11 +74,12 @@ $ curl -s -H "Authorization: Bearer mrg_wrong..." -H "Content-Type: application/
 
 # 7. The audit log: one JSON line per request, no token, no argument values.
 $ cat audit.jsonl
-{"v":1,"ts":"2026-11-04T14:25:47.790Z","token":"desktop","peer":"127.0.0.1","method":"initialize","tool":null,"outcome":"allowed","reason":"ok","duration_ms":0,"request_bytes":149,"response_bytes":204}
-{"v":1,"ts":"2026-11-04T14:25:47.808Z","token":"desktop","peer":"127.0.0.1","method":"tools/list","tool":null,"outcome":"allowed","reason":"ok","duration_ms":1,"request_bytes":46,"response_bytes":452}
-{"v":1,"ts":"2026-11-04T14:25:47.823Z","token":"desktop","peer":"127.0.0.1","method":"tools/call","tool":"list_chats","outcome":"allowed","reason":"ok","duration_ms":1,"request_bytes":92,"response_bytes":121}
-{"v":1,"ts":"2026-11-04T14:25:47.840Z","token":"desktop","peer":"127.0.0.1","method":"tools/call","tool":"send_message","outcome":"denied","reason":"read_only","duration_ms":0,"request_bytes":121,"response_bytes":123}
-{"v":1,"ts":"2026-11-04T14:25:47.856Z","token":null,"peer":"127.0.0.1","method":"http POST","tool":null,"outcome":"denied","reason":"bad_token","duration_ms":1,"request_bytes":40,"response_bytes":76}
+{"v":1,"ts":"2026-11-04T15:10:15.082Z","token":"desktop","peer":"127.0.0.1","method":"initialize","tool":null,"outcome":"allowed","reason":"ok","duration_ms":0,"request_bytes":149,"response_bytes":204}
+{"v":1,"ts":"2026-11-04T15:10:15.098Z","token":"desktop","peer":"127.0.0.1","method":"tools/list","tool":null,"outcome":"allowed","reason":"ok","duration_ms":1,"request_bytes":46,"response_bytes":452}
+{"v":1,"ts":"2026-11-04T15:10:15.115Z","token":"desktop","peer":"127.0.0.1","method":"tools/call","tool":"list_chats","outcome":"started","reason":"intent","duration_ms":0,"request_bytes":92,"response_bytes":0}
+{"v":1,"ts":"2026-11-04T15:10:15.116Z","token":"desktop","peer":"127.0.0.1","method":"tools/call","tool":"list_chats","outcome":"allowed","reason":"ok","duration_ms":0,"request_bytes":92,"response_bytes":121}
+{"v":1,"ts":"2026-11-04T15:10:15.133Z","token":"desktop","peer":"127.0.0.1","method":"tools/call","tool":"send_message","outcome":"denied","reason":"read_only","duration_ms":0,"request_bytes":121,"response_bytes":123}
+{"v":1,"ts":"2026-11-04T15:10:15.149Z","token":null,"peer":"127.0.0.1","method":"http POST","tool":null,"outcome":"denied","reason":"bad_token","duration_ms":0,"request_bytes":0,"response_bytes":76}
 
 # 8. The kill switch: while the file exists every request gets 503.
 $ touch KILL
@@ -92,10 +93,10 @@ $ curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" 
 
 # 9. Stop the gateway; it stops the server and its process group.
 $ kill -TERM $GATE_PID
-  gate: 2026-11-04T14:25:47.701Z INFO upstream server ready: fake-whatsapp 0.1.0 (protocol 2025-06-18)
-  gate: 2026-11-04T14:25:47.701Z INFO listening on 127.0.0.1:8787
-  gate: 2026-11-04T14:25:47.701Z INFO mcp-remote-gate 0.1.0 ready on 127.0.0.1:8787
-  gate: 2026-11-04T14:25:47.902Z INFO shutting down: finishing requests in progress, then stopping the upstream server
+  gate: 2026-11-04T15:10:15.017Z INFO upstream server ready: fake-whatsapp 0.1.0 (protocol 2025-06-18)
+  gate: 2026-11-04T15:10:15.018Z INFO listening on 127.0.0.1:8787
+  gate: 2026-11-04T15:10:15.018Z INFO mcp-remote-gate 0.1.0 ready on 127.0.0.1:8787
+  gate: 2026-11-04T15:10:15.221Z INFO shutting down: finishing requests in progress, then stopping the upstream server
 
 # 10. Enabling sending is one line: read_only = false.
 $ sed -i "s/^read_only = true/read_only = false/" gate.toml
@@ -106,9 +107,9 @@ $ curl -s -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" 
 $ cat sent.log
 send_message to=alice text=hello
 $ kill -TERM $GATE_PID
-  gate: 2026-11-04T14:25:47.923Z WARN every tool of the server is callable, including any that send, write or delete: set read_only = true or add a deny list
-  gate: 2026-11-04T14:25:47.925Z INFO upstream server ready: fake-whatsapp 0.1.0 (protocol 2025-06-18)
-  gate: 2026-11-04T14:25:47.925Z INFO listening on 127.0.0.1:8787
-  gate: 2026-11-04T14:25:47.925Z INFO mcp-remote-gate 0.1.0 ready on 127.0.0.1:8787
-  gate: 2026-11-04T14:25:48.091Z INFO upstream stderr: [fake-mcp] WRITE TOOL CALLED: send_message to=alice text=hello
-  gate: 2026-11-04T14:25:48.128Z INFO shutting down: finishing requests in progress, then stopping the upstream server
+  gate: 2026-11-04T15:10:15.248Z WARN every tool of the server is callable, including any that send, write or delete: set read_only = true or add a deny list
+  gate: 2026-11-04T15:10:15.249Z INFO upstream server ready: fake-whatsapp 0.1.0 (protocol 2025-06-18)
+  gate: 2026-11-04T15:10:15.249Z INFO listening on 127.0.0.1:8787
+  gate: 2026-11-04T15:10:15.249Z INFO mcp-remote-gate 0.1.0 ready on 127.0.0.1:8787
+  gate: 2026-11-04T15:10:15.316Z INFO upstream stderr: [fake-mcp] WRITE TOOL CALLED: send_message to=alice text=hello
+  gate: 2026-11-04T15:10:15.350Z INFO shutting down: finishing requests in progress, then stopping the upstream server

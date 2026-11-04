@@ -27,6 +27,7 @@ mcp() {
 
 start_gate() {
   printf '$ mcp-remote-gate run --config gate.toml &\n'
+  : > gate.log
   mcp-remote-gate run --config gate.toml 2> gate.log &
   GATE=$!
   i=0
