@@ -5,6 +5,7 @@ members = [
   "crates/gate-app",
   "crates/gate-sys",
   "crates/gate-infra",
+  "crates/gate-fake-mcp",
 ]
 
 [workspace.package]

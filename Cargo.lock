@@ -14,6 +14,13 @@ name = "gate-domain"
 version = "0.1.0"
 
 [[package]]
+name = "gate-fake-mcp"
+version = "0.1.0"
+dependencies = [
+ "gate-domain",
+]
+
+[[package]]
 name = "gate-infra"
 version = "0.1.0"
 dependencies = [
