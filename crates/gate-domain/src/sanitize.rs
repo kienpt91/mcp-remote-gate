@@ -10,9 +10,31 @@ use crate::json::Value;
 
 pub const REDACTED: &str = "[redacted]";
 
-fn is_invisible_or_control(c: char) -> bool {
+/// Characters that are invisible or that steer how text is displayed: control characters (C0, DEL
+/// and C1), line and paragraph separators, and the format characters of Unicode (bidirectional
+/// controls and isolates, zero-width characters, soft hyphen, word joiners, byte order mark, tags).
+pub fn is_invisible_or_control(c: char) -> bool {
     c.is_control()
-        || matches!(c, '\u{200b}'..='\u{200f}' | '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
+        || matches!(
+            c,
+            '\u{ad}'
+                | '\u{600}'..='\u{605}'
+                | '\u{61c}'
+                | '\u{6dd}'
+                | '\u{70f}'
+                | '\u{8e2}'
+                | '\u{180e}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{feff}'
+                | '\u{fff9}'..='\u{fffb}'
+                | '\u{110bd}'
+                | '\u{1bca0}'..='\u{1bca3}'
+                | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0001}'
+                | '\u{e0020}'..='\u{e007f}'
+        )
 }
 
 /// Replaces control characters, line separators and bidirectional or zero-width marks by a

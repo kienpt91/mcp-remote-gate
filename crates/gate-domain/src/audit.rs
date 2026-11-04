@@ -2,7 +2,7 @@
 //! values of the arguments.
 
 use crate::json::Value;
-use crate::sanitize::truncate_chars;
+use crate::sanitize::escape_control;
 
 /// Longest text of a client-supplied field (method, tool, peer) kept in a record.
 pub const MAX_FIELD_CHARS: usize = 128;
@@ -51,7 +51,8 @@ pub struct AuditRecord {
 impl AuditRecord {
     /// The record as one line of JSON (no trailing newline).
     pub fn to_line(&self) -> String {
-        let text = |s: &str| Value::String(truncate_chars(s, MAX_FIELD_CHARS));
+        // every client- or server-supplied text goes through the same escaping as the log lines on stderr
+        let text = |s: &str| Value::String(escape_control(s, MAX_FIELD_CHARS));
         let opt = |s: &Option<String>| s.as_deref().map_or(Value::Null, text);
         let mut members: Vec<(String, Value)> = vec![
             ("v".into(), Value::int(1)),
@@ -197,12 +198,32 @@ mod tests {
         assert!(line.len() < 1000);
         let v = parse(&line).unwrap();
         assert!(v.get("forged").is_none());
-        assert_eq!(
-            v.get("tool")
-                .and_then(Value::as_str)
-                .map(|t| t.chars().count()),
-            Some(MAX_FIELD_CHARS)
+        let tool = v.get("tool").and_then(Value::as_str).unwrap();
+        assert_eq!(tool.chars().count(), MAX_FIELD_CHARS + "[...]".len());
+        assert!(tool.ends_with("[...]"), "a cut is marked");
+    }
+
+    #[test]
+    fn invisible_and_c1_characters_are_escaped_in_every_text_field() {
+        let nasty = "a\u{202e}b\u{200b}c\u{2028}d\u{9b}e\u{85}f\u{feff}g\u{2066}h\u{ad}i\u{2060}j";
+        let mut r = record();
+        r.token = Some(nasty.into());
+        r.peer = Some(nasty.into());
+        r.method = nasty.into();
+        r.tool = Some(nasty.into());
+        r.reason = nasty.into();
+        let line = r.to_line();
+        for c in [
+            '\u{202e}', '\u{200b}', '\u{2028}', '\u{9b}', '\u{85}', '\u{feff}', '\u{2066}',
+            '\u{ad}', '\u{2060}',
+        ] {
+            assert!(!line.contains(c), "{:x} reached the audit line", c as u32);
+        }
+        assert!(
+            line.contains("\\\\u{202e}"),
+            "the escape is visible: {line}"
         );
+        assert!(parse(&line).is_ok());
     }
 
     #[test]
