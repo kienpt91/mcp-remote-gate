@@ -1345,3 +1345,79 @@ fn the_listing_is_not_asked_for_a_tool_the_policy_already_refused() {
         .handle(&post(Some(&r.full_token), &call("send_message", "{}")));
     assert!(r.upstream.calls().is_empty());
 }
+
+#[test]
+fn the_preflight_refuses_what_needs_no_body_to_refuse() {
+    let r = rig();
+    let wrong = token_from_entropy(&[9; 32]);
+    let empty = |token: Option<&str>| post(token, "");
+    // a bad or missing token
+    for token in [None, Some(wrong.as_str())] {
+        let refusal = r.gateway.preflight(&empty(token)).expect("refused");
+        assert_eq!(refusal.status, 401);
+        assert!(refusal.challenge);
+    }
+    // a foreign host, a foreign origin, another path
+    let mut req = empty(Some(&r.full_token));
+    req.host = Some("evil.example:8787".into());
+    assert_eq!(r.gateway.preflight(&req).unwrap().status, 403);
+    let mut req = empty(Some(&r.full_token));
+    req.origin = Some("https://evil.example".into());
+    assert_eq!(r.gateway.preflight(&req).unwrap().status, 403);
+    let mut req = empty(Some(&r.full_token));
+    req.path = "/other".into();
+    assert_eq!(r.gateway.preflight(&req).unwrap().status, 404);
+    // the kill switch
+    r.kill.set(true);
+    assert_eq!(
+        r.gateway
+            .preflight(&empty(Some(&r.full_token)))
+            .unwrap()
+            .status,
+        503
+    );
+    r.kill.set(false);
+    // each refusal was audited once, and none of them reached the server
+    let reasons: Vec<String> = r
+        .audit
+        .records()
+        .iter()
+        .map(|rec| rec.reason.clone())
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            "missing_token",
+            "bad_token",
+            "host_rejected",
+            "origin_rejected",
+            "not_found",
+            "kill_switch"
+        ]
+    );
+    assert!(r.upstream.calls().is_empty());
+}
+
+#[test]
+fn a_request_that_passes_the_preflight_is_neither_recorded_nor_counted_twice() {
+    let r = rig();
+    let req = post(Some(&r.full_token), &rpc(1, "ping", "{}"));
+    assert!(r.gateway.preflight(&req).is_none());
+    assert!(
+        r.audit.records().is_empty(),
+        "the record is written when the request is handled"
+    );
+    assert_eq!(r.gateway.handle(&req).status, 200);
+    assert_eq!(r.audit.records().len(), 1);
+}
+
+#[test]
+fn the_preflight_counts_failed_authentications_like_handle_does() {
+    let r = rig();
+    let wrong = token_from_entropy(&[9; 32]);
+    let statuses: Vec<u16> = (0..8)
+        .map(|_| r.gateway.preflight(&post(Some(&wrong), "")).unwrap().status)
+        .collect();
+    assert_eq!(statuses.iter().filter(|s| **s == 401).count(), 5);
+    assert_eq!(statuses.iter().filter(|s| **s == 429).count(), 3);
+}

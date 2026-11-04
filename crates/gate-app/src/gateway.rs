@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use gate_domain::audit::{AuditRecord, Outcome};
 use gate_domain::auth::{bearer_token, Authenticator, BearerError, Scope, TokenEntry};
 use gate_domain::config::Config;
-use gate_domain::hostcheck::{HostError, HostPolicy};
+use gate_domain::hostcheck::HostPolicy;
 use gate_domain::json::{self, Value};
 use gate_domain::jsonrpc::{self, Message, RpcError};
 use gate_domain::mcp::{
@@ -242,6 +242,62 @@ impl Gateway {
         }
     }
 
+    /// The checks that need no body: kill switch, path, `Host`, `Origin` and the token. The HTTP
+    /// server runs them before it reads a body or answers `Expect: 100-continue`, so a client that
+    /// is not welcome costs a connection for as long as it takes to read its headers, and no more.
+    /// A refusal is returned (and audited); `None` means the request may go on to [`Gateway::handle`],
+    /// which repeats the same checks and then looks at the body.
+    pub fn preflight(&self, req: &Request) -> Option<Response> {
+        let ctx = Ctx {
+            req,
+            started: self.ports.clock.mono_ms(),
+            token: None,
+            method: format!("http {}", method_name(req.method)),
+            tool: None,
+            arguments: None,
+        };
+        match self.early_checks(&ctx) {
+            Ok(_) => None,
+            Err((reason, response)) => Some(self.finish(&ctx, Outcome::Denied, reason, *response)),
+        }
+    }
+
+    /// The checks of the start of a request. On success returns the token entry.
+    fn early_checks(&self, ctx: &Ctx<'_>) -> Result<&TokenEntry, (&'static str, Box<Response>)> {
+        let req = ctx.req;
+        if self.ports.kill.engaged() {
+            let mut r = http_response(
+                503,
+                jsonrpc::UPSTREAM_UNAVAILABLE,
+                "the gateway is switched off",
+            );
+            r.retry_after_secs = Some(30);
+            return Err(("kill_switch", Box::new(r)));
+        }
+        if req.path != self.cfg.endpoint {
+            return Err((
+                "not_found",
+                Box::new(http_response(404, jsonrpc::INVALID_REQUEST, "not found")),
+            ));
+        }
+        if self.cfg.hosts.check_host(req.host.as_deref()).is_err() {
+            return Err((
+                "host_rejected",
+                Box::new(http_response(403, jsonrpc::FORBIDDEN, "host not allowed")),
+            ));
+        }
+        if self.cfg.hosts.check_origin(req.origin.as_deref()).is_err() {
+            return Err((
+                "origin_rejected",
+                Box::new(http_response(403, jsonrpc::FORBIDDEN, "origin not allowed")),
+            ));
+        }
+        self.authenticate(req).map_err(|refusal| {
+            let (reason, response) = *refusal;
+            (reason, Box::new(response))
+        })
+    }
+
     pub fn handle(&self, req: &Request) -> Response {
         let mut ctx = Ctx {
             req,
@@ -251,47 +307,10 @@ impl Gateway {
             tool: None,
             arguments: None,
         };
-        if self.ports.kill.engaged() {
-            let mut r = http_response(
-                503,
-                jsonrpc::UPSTREAM_UNAVAILABLE,
-                "the gateway is switched off",
-            );
-            r.retry_after_secs = Some(30);
-            return self.finish(&ctx, Outcome::Denied, "kill_switch", r);
-        }
-        if req.path != self.cfg.endpoint {
-            return self.finish(
-                &ctx,
-                Outcome::Denied,
-                "not_found",
-                http_response(404, jsonrpc::INVALID_REQUEST, "not found"),
-            );
-        }
-        match self.cfg.hosts.check_host(req.host.as_deref()) {
-            Ok(()) => {}
-            Err(HostError::Missing | HostError::NotAllowed) => {
-                return self.finish(
-                    &ctx,
-                    Outcome::Denied,
-                    "host_rejected",
-                    http_response(403, jsonrpc::FORBIDDEN, "host not allowed"),
-                );
-            }
-        }
-        if self.cfg.hosts.check_origin(req.origin.as_deref()).is_err() {
-            return self.finish(
-                &ctx,
-                Outcome::Denied,
-                "origin_rejected",
-                http_response(403, jsonrpc::FORBIDDEN, "origin not allowed"),
-            );
-        }
-        let token = match self.authenticate(req) {
+        let token = match self.early_checks(&ctx) {
             Ok(token) => token,
-            Err(response_reason) => {
-                let (reason, response) = *response_reason;
-                return self.finish(&ctx, Outcome::Denied, reason, response);
+            Err((reason, response)) => {
+                return self.finish(&ctx, Outcome::Denied, reason, *response);
             }
         };
         ctx.token = Some(token.id.as_str().to_string());
