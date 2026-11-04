@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "gate-app"
+version = "0.1.0"
+dependencies = [
+ "gate-domain",
+]
+
+[[package]]
 name = "gate-domain"
 version = "0.1.0"
