@@ -1,0 +1,34 @@
+# build output
+/target/
+*.profraw
+*.profdata
+/cov/
+.DS_Store
+
+# secret files: never commit these (see scripts/secret-scan.sh)
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa*
+id_ed25519*
+.netrc
+/credentials.json
+service-account*.json
+/secrets.json
+/secrets.yml
+/secrets.yaml
+/secrets.toml
+*.tfstate
+*.tfstate.*
+
+# local gateway state: a real config, audit logs and kill switch files stay out of the repository
+/gate.toml
+/audit.jsonl
+/KILL
