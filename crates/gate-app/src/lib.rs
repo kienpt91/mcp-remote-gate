@@ -3,6 +3,8 @@
 //! traits of [`ports`]: it opens no file, socket or process and reads no clock of its own.
 
 pub mod gateway;
+#[cfg(test)]
+mod gateway_tests;
 pub mod ports;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
