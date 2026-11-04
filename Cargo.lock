@@ -10,6 +10,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "gate-cli"
+version = "0.1.0"
+dependencies = [
+ "gate-app",
+ "gate-domain",
+ "gate-fake-mcp",
+ "gate-infra",
+ "gate-sys",
+]
+
+[[package]]
 name = "gate-domain"
 version = "0.1.0"
 

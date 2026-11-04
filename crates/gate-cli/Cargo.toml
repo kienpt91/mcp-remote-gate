@@ -1,0 +1,30 @@
+[package]
+name = "gate-cli"
+description = "The mcp-remote-gate command line: run, check, tools, token, selftest."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "gate_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mcp-remote-gate"
+path = "src/main.rs"
+
+[dependencies]
+gate-domain = { path = "../gate-domain" }
+gate-app = { path = "../gate-app" }
+gate-infra = { path = "../gate-infra" }
+gate-sys = { path = "../gate-sys" }
+gate-fake-mcp = { path = "../gate-fake-mcp" }
+
+[dev-dependencies]
+gate-app = { path = "../gate-app", features = ["testing"] }

@@ -1,0 +1,68 @@
+# mcp-remote-gate configuration. Copy to gate.toml, replace the token hash and adjust the child.
+# Relative paths are taken relative to the directory of this file. The file must not be writable by
+# other users. Unknown keys are errors, so a typo never silently loosens a rule.
+
+[server]
+# Loopback only by default. The gateway has no TLS: put a reverse proxy or tunnel that terminates
+# TLS in front of it. Binding any other address needs the --i-know-this-is-not-tls flag.
+listen = "127.0.0.1:8787"
+endpoint = "/mcp"
+# Host values accepted (DNS rebinding defense). Default for a loopback listener: 127.0.0.1, localhost
+# and [::1] with the port. Behind a proxy or tunnel, add the public name:
+# allowed_hosts = ["mcp.example.com", "127.0.0.1:8787"]
+# Origin values accepted. Native clients send no Origin; a request that has one is refused unless listed.
+# allowed_origins = []
+max_request_bytes = 1048576
+request_timeout_ms = 30000        # how long one tool call may take
+# kill_switch_file = "KILL"       # while this file exists every request gets 503 (also: SIGUSR1 on, SIGUSR2 off)
+
+[child]
+# The server to put behind the gateway: a fixed argv, never a shell string.
+command = ["mcp-remote-gate", "fake-mcp"]
+# cwd = "/srv/whatsapp-mcp"
+# The child gets only these variables of the gateway's environment, plus [child.env] below.
+inherit_env = ["PATH"]
+restart = "on-failure"            # "never", "on-failure" or "always"
+max_restarts = 5
+# Resource limits (applied before the program starts). memory_mb suits small native servers, not Node.
+# cpu_seconds = 600
+# max_open_files = 256
+# max_file_mb = 100
+
+[child.env]
+# SOME_SETTING = "value"
+
+[tools]
+# Nothing is exposed unless it is allowed here. Deny always wins.
+allow = ["*"]
+deny = []
+# THE SWITCH. true: only tools whose names look like reads (get_*, list_*, search_*, ...) are exposed.
+# Set it to false to enable everything that `allow` lets through, sending included.
+read_only = true
+# read_patterns = ["get_*", "list_*", "read_*", "search_*", "find_*", "fetch_*", "describe_*", "query_*", "show_*", "view_*", "count_*", "lookup_*"]
+
+# Limits on the arguments of matching tools (applied before the call reaches the server).
+# [[tools.rule]]
+# tool = "send_*"
+# max_string_len = 500
+# max_arg_bytes = 4096
+# forbid_values = ["*://*"]
+
+[limits]
+requests_per_minute = 120         # per token
+burst = 20
+failed_auth_per_minute = 30       # bad tokens answered with 401 per minute, then 429
+max_inflight = 16
+# result_max_bytes = 262144       # cut tool text to fit; refuse results that cannot be cut
+# tool_result_prefix = "[tool output, untrusted] "
+
+[audit]
+path = "audit.jsonl"              # one JSON line per request; never the token
+log_arguments = false             # true writes redacted argument values
+
+[[token]]
+id = "desktop"
+# Create one with: mcp-remote-gate token new --id desktop
+hash = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+scopes = ["tools:list", "tools:call"]
+# tools = ["get_*", "list_*"]     # this token sees and calls only these (can narrow, never widen)
