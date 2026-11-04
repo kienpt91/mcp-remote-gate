@@ -4,4 +4,5 @@
 pub mod config_file;
 pub mod testutil;
 pub mod toml;
+pub mod audit_file;
 pub mod system;
