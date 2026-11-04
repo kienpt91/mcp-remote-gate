@@ -8,6 +8,7 @@
 pub mod args;
 mod check;
 mod init;
+mod token;
 
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -84,6 +85,7 @@ pub fn run(args: &[String], io: &mut Io<'_>) -> i32 {
     };
     match command.as_str() {
         "check" => check::run(rest, io),
+        "token" => token::run(rest, io),
         "init" => init::run(rest, io),
         "version" | "--version" | "-V" => {
             let _ = writeln!(io.out, "mcp-remote-gate {VERSION}");
