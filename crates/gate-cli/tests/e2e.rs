@@ -205,7 +205,8 @@ fn a_token_from_token_new_works_against_a_running_gateway() {
     assert_eq!(run.wait_exit(), 0);
     assert!(run.log().contains("shutting down"), "{}", run.log());
     let audit = std::fs::read_to_string(s.path("audit.jsonl")).unwrap();
-    assert_eq!(audit.lines().count(), 3);
+    // list_chats: intent and completion; the denied send; the bad token
+    assert_eq!(audit.lines().count(), 4);
     assert!(!audit.contains(&token));
 }
 

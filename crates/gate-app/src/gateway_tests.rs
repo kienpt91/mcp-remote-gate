@@ -76,6 +76,15 @@ fn policy() -> ToolPolicy {
 }
 
 fn rig_with(cfg: GatewayConfig, policy: ToolPolicy, upstream: FakeUpstream) -> Rig {
+    rig_with_audit(cfg, policy, upstream, Arc::new(MemoryAudit::new()))
+}
+
+fn rig_with_audit(
+    cfg: GatewayConfig,
+    policy: ToolPolicy,
+    upstream: FakeUpstream,
+    audit: Arc<MemoryAudit>,
+) -> Rig {
     let (full, read, narrow) = (
         token_from_entropy(&[1; 32]),
         token_from_entropy(&[2; 32]),
@@ -98,7 +107,6 @@ fn rig_with(cfg: GatewayConfig, policy: ToolPolicy, upstream: FakeUpstream) -> R
     ]);
     let upstream = Arc::new(upstream);
     let clock = Arc::new(FakeClock::new());
-    let audit = Arc::new(MemoryAudit::new());
     let kill = Arc::new(FlagKillSwitch::default());
     let log = Arc::new(VecLogger::default());
     let ports = Ports {
@@ -763,7 +771,7 @@ fn results_get_a_label_and_a_size_cap() {
         .gateway
         .handle(&post(Some(&r.full_token), &call("get_chats", "{}")));
     assert_eq!(error_code(&resp), jsonrpc::RESULT_TOO_LARGE);
-    assert_eq!(r.audit.records()[0].outcome, Outcome::Error);
+    assert_eq!(r.audit.records().last().unwrap().outcome, Outcome::Error);
 }
 
 #[test]
@@ -814,7 +822,7 @@ fn upstream_failures_map_to_distinct_answers() {
             (status, code),
             "{error:?}"
         );
-        assert_eq!(r.audit.records()[0].reason, reason);
+        assert_eq!(r.audit.records().last().unwrap().reason, reason);
         let text = String::from_utf8_lossy(&resp.body).into_owned();
         assert!(
             !text.contains("secret internals")
@@ -968,4 +976,112 @@ fn bidi_and_zero_width_characters_in_a_method_or_tool_name_do_not_reach_the_audi
         );
     }
     assert_eq!(r.audit.records().len(), 2);
+}
+
+#[test]
+fn an_intent_record_is_on_disk_before_the_call_reaches_the_server() {
+    let audit = Arc::new(MemoryAudit::new());
+    let seen_by_the_server: Arc<std::sync::Mutex<Vec<gate_domain::audit::AuditRecord>>> =
+        Arc::default();
+    let (for_server, snapshot) = (Arc::clone(&audit), Arc::clone(&seen_by_the_server));
+    let upstream = FakeUpstream::new(move |_, _| {
+        // what the audit log holds at the moment the server is asked
+        *snapshot.lock().unwrap() = for_server.records();
+        Ok(Value::object([(
+            "content",
+            Value::Array(vec![Value::object([
+                ("type", Value::str("text")),
+                ("text", Value::str("done")),
+            ])]),
+        )]))
+    });
+    let mut p = policy();
+    p.read_only = false;
+    let r = rig_with_audit(config(), p, upstream, audit);
+    let resp = r.gateway.handle(&post(
+        Some(&r.full_token),
+        &call("get_chats", r#"{"limit":2}"#),
+    ));
+    assert_eq!(resp.status, 200);
+    let during = seen_by_the_server.lock().unwrap().clone();
+    assert_eq!(
+        during.len(),
+        1,
+        "exactly the intent record exists while the call runs"
+    );
+    assert_eq!(during[0].outcome, Outcome::Started);
+    assert_eq!(during[0].reason, "intent");
+    assert_eq!(during[0].tool.as_deref(), Some("get_chats"));
+    assert_eq!(during[0].token.as_deref(), Some("full"));
+    assert_eq!(during[0].method, "tools/call");
+    assert!(during[0].arguments.is_none());
+    let all = r.audit.records();
+    assert_eq!(
+        all.iter().map(|rec| rec.outcome).collect::<Vec<_>>(),
+        [Outcome::Started, Outcome::Allowed],
+        "the completion record follows"
+    );
+}
+
+#[test]
+fn a_call_that_never_completes_still_leaves_its_intent() {
+    // the server never answers: the call times out, and the trail shows the intent and the timeout
+    let mut p = policy();
+    p.read_only = false;
+    let r = rig_with(
+        config(),
+        p,
+        FakeUpstream::new(|_, _| Err(UpstreamError::Timeout)),
+    );
+    r.gateway
+        .handle(&post(Some(&r.full_token), &call("get_chats", "{}")));
+    let outcomes: Vec<_> = r
+        .audit
+        .records()
+        .iter()
+        .map(|rec| (rec.outcome, rec.reason.clone()))
+        .collect();
+    assert_eq!(
+        outcomes,
+        [
+            (Outcome::Started, "intent".to_string()),
+            (Outcome::Error, "timeout".to_string())
+        ]
+    );
+}
+
+#[test]
+fn the_first_failed_write_already_refuses_the_call() {
+    // no earlier write failed: the intent write itself is what is checked
+    let mut p = policy();
+    p.read_only = false;
+    let r = rig_with(config(), p, FakeUpstream::with_tools(&["get_chats"]));
+    r.audit.fail_writes(true);
+    let resp = r
+        .gateway
+        .handle(&post(Some(&r.full_token), &call("get_chats", "{}")));
+    assert_eq!(resp.status, 503);
+    assert_eq!(resp.retry_after_secs, Some(30));
+    assert!(
+        r.upstream.calls().is_empty(),
+        "the call never reached the server"
+    );
+    assert!(r.log.contains("cannot write the audit log"));
+}
+
+#[test]
+fn requests_that_never_reach_the_server_have_a_single_record() {
+    let r = rig();
+    r.gateway
+        .handle(&post(Some(&r.full_token), &call("send_message", "{}")));
+    r.gateway
+        .handle(&post(Some(&r.full_token), &rpc(2, "tools/list", "{}")));
+    r.gateway
+        .handle(&post(Some(&r.full_token), &rpc(3, "ping", "{}")));
+    assert_eq!(r.audit.records().len(), 3);
+    assert!(r
+        .audit
+        .records()
+        .iter()
+        .all(|rec| rec.outcome != Outcome::Started));
 }

@@ -549,10 +549,16 @@ impl Gateway {
                 rpc_error(id, jsonrpc::FORBIDDEN, &message),
             );
         }
-        if !self.ports.audit.healthy() {
+        // The intent is on record before the server hears of the call: if it cannot be written the
+        // call does not happen, and if the gateway or the machine dies during the call the log still
+        // says that it was started. The completion record follows in `finish`.
+        if let Err(e) = self.ports.audit.record(&self.intent_record(ctx)) {
             self.ports.log.log(
                 Level::Error,
-                "the audit log cannot be written: refusing tool calls until it can",
+                &format!(
+                    "cannot write the audit log, refusing the tool call: {}",
+                    escape_control(&e, 160)
+                ),
             );
             let mut r = http_response(
                 503,
@@ -660,6 +666,24 @@ impl Gateway {
                     rpc_error(id, e.code, &message),
                 )
             }
+        }
+    }
+
+    /// The record written before an allowed tool call is forwarded.
+    fn intent_record(&self, ctx: &Ctx<'_>) -> AuditRecord {
+        AuditRecord {
+            unix_ms: self.ports.clock.unix_ms(),
+            token: ctx.token.clone(),
+            peer: ctx.req.peer.clone(),
+            method: ctx.method.clone(),
+            tool: ctx.tool.clone(),
+            outcome: Outcome::Started,
+            reason: "intent".to_string(),
+            duration_ms: 0,
+            request_bytes: ctx.req.body.len(),
+            response_bytes: 0,
+            arguments: ctx.arguments.clone(),
+            suppressed: 0,
         }
     }
 

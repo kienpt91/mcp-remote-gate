@@ -84,10 +84,6 @@ impl AuditSink for MemoryAudit {
         lock(&self.records).push(record.clone());
         Ok(())
     }
-
-    fn healthy(&self) -> bool {
-        !self.failing.load(Ordering::SeqCst)
-    }
 }
 
 #[derive(Default)]

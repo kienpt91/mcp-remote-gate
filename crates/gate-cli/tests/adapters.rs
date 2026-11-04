@@ -448,14 +448,23 @@ fn the_audit_log_tells_the_story_without_secrets() {
         "{raw}"
     );
     let lines = s.audit_lines();
-    assert_eq!(lines.len(), 3);
+    // an allowed call leaves two records (its intent, then its completion); a denied one, one
+    assert_eq!(lines.len(), 4);
     let field = |i: usize, k: &str| lines[i].get(k).and_then(Value::as_str).map(str::to_string);
     assert_eq!(
-        (field(0, "tool"), field(0, "outcome")),
+        (field(0, "tool"), field(0, "outcome"), field(0, "reason")),
+        (
+            Some("list_chats".into()),
+            Some("started".into()),
+            Some("intent".into())
+        )
+    );
+    assert_eq!(
+        (field(1, "tool"), field(1, "outcome")),
         (Some("list_chats".into()), Some("allowed".into()))
     );
     assert_eq!(
-        (field(1, "tool"), field(1, "outcome"), field(1, "reason")),
+        (field(2, "tool"), field(2, "outcome"), field(2, "reason")),
         (
             Some("send_message".into()),
             Some("denied".into()),
@@ -463,7 +472,7 @@ fn the_audit_log_tells_the_story_without_secrets() {
         )
     );
     assert_eq!(
-        (field(2, "token"), field(2, "reason")),
+        (field(3, "token"), field(3, "reason")),
         (None, Some("bad_token".into()))
     );
     assert_eq!(field(0, "token"), Some("tester".into()));

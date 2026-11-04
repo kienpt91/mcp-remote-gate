@@ -16,12 +16,10 @@ pub trait Clock: Send + Sync {
 }
 
 pub trait AuditSink: Send + Sync {
-    /// Appends one record. A sink that cannot write reports it here and through
-    /// [`AuditSink::healthy`].
+    /// Appends one record and reports whether it was written. The gateway runs a tool only after the
+    /// record of its intent was written, so a sink must not report success for a record it did not
+    /// store; once a write failed it keeps failing until it has verified that writing works again.
     fn record(&self, record: &AuditRecord) -> Result<(), String>;
-    /// False once a write failed; the gateway then refuses tool calls instead of running them
-    /// without a trail.
-    fn healthy(&self) -> bool;
 }
 
 /// A switch that makes the gateway answer 503 at once.

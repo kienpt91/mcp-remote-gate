@@ -51,8 +51,11 @@ impl AuditSink for FileAudit {
             }
         }
     }
+}
 
-    fn healthy(&self) -> bool {
+impl FileAudit {
+    /// False after a failed write.
+    pub fn healthy(&self) -> bool {
         self.healthy.load(Ordering::SeqCst)
     }
 }
