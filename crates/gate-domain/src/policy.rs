@@ -322,6 +322,101 @@ mod tests {
         assert!(Decision::Allow.is_allowed() && !Decision::Deny(DenyReason::Denied).is_allowed());
     }
 
+    /// A tiny deterministic generator keeps the property tests free of dependencies.
+    fn rng(seed: u64) -> impl FnMut() -> u64 {
+        let mut x = seed;
+        move || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        }
+    }
+
+    fn random_name(next: &mut dyn FnMut() -> u64) -> String {
+        let parts = [
+            "get", "send", "list", "delete", "_", "chat", "message", "x", "*", "?", "é",
+        ];
+        (0..1 + next() % 4)
+            .map(|_| parts[(next() % parts.len() as u64) as usize])
+            .collect()
+    }
+
+    fn random_pattern(next: &mut dyn FnMut() -> u64) -> Glob {
+        loop {
+            let mut text: String = random_name(next);
+            if next().is_multiple_of(3) {
+                text.push('*');
+            }
+            if let Ok(g) = Glob::new(&text) {
+                return g;
+            }
+        }
+    }
+
+    #[test]
+    fn property_deny_always_wins_and_the_default_denies() {
+        let mut next = rng(0x5eed_1234_abcd_ef01);
+        for _ in 0..3000 {
+            let policy = ToolPolicy {
+                allow: (0..next() % 3).map(|_| random_pattern(&mut next)).collect(),
+                deny: (0..next() % 3).map(|_| random_pattern(&mut next)).collect(),
+                read_only: next().is_multiple_of(2),
+                read_patterns: default_read_patterns(),
+                rules: vec![],
+            };
+            let tool = random_name(&mut next);
+            let decision = policy.decide(&tool);
+            if policy.deny.iter().any(|g| g.matches(&tool)) {
+                assert_eq!(decision, Decision::Deny(DenyReason::Denied), "{tool}");
+            }
+            if decision.is_allowed() {
+                assert!(!policy.deny.iter().any(|g| g.matches(&tool)));
+                let listed = if policy.allow.is_empty() {
+                    policy.read_only
+                } else {
+                    policy.allow.iter().any(|g| g.matches(&tool))
+                };
+                assert!(
+                    listed,
+                    "an allowed tool is on the allowlist (or the read preset): {tool}"
+                );
+                if policy.read_only {
+                    assert!(
+                        policy.read_patterns.iter().any(|g| g.matches(&tool)),
+                        "read_only allows reads only: {tool}"
+                    );
+                }
+            }
+            if policy.allow.is_empty() && !policy.read_only {
+                assert!(
+                    !decision.is_allowed(),
+                    "nothing is allowed by default: {tool}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn property_a_token_list_never_widens_the_policy() {
+        let mut next = rng(0x0bad_cafe_f00d_1111);
+        for _ in 0..3000 {
+            let policy = ToolPolicy {
+                allow: (0..next() % 3).map(|_| random_pattern(&mut next)).collect(),
+                deny: (0..next() % 2).map(|_| random_pattern(&mut next)).collect(),
+                read_only: next().is_multiple_of(2),
+                read_patterns: default_read_patterns(),
+                rules: vec![],
+            };
+            let mut t = token(None);
+            t.tools = Some((0..next() % 3).map(|_| random_pattern(&mut next)).collect());
+            let tool = random_name(&mut next);
+            if policy.decide_for(&t, &tool).is_allowed() {
+                assert!(policy.decide(&tool).is_allowed(), "{tool}");
+            }
+        }
+    }
+
     #[test]
     fn deny_reason_codes_are_distinct() {
         let codes = [
