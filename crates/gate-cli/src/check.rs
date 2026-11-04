@@ -49,10 +49,10 @@ pub fn describe(config: &Config, path: &str) -> String {
     ));
     let c = &config.child;
     line(format!(
-        "child:       {} ({} argument(s), restart {:?}, up to {} restarts)",
+        "child:       {} ({} argument(s), restart {}, up to {} restarts)",
         c.command.first().map_or("", String::as_str),
         c.command.len().saturating_sub(1),
-        c.restart.mode,
+        c.restart.mode.as_str(),
         c.restart.max_restarts
     ));
     line(format!(
