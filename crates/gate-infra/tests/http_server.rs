@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use gate_app::gateway::{Request, Response};
 use gate_app::testing::VecLogger;
-use gate_infra::http::{Handler, HttpLimits, HttpServer};
+use gate_infra::http::{Handler, HttpLimits, HttpServer, Preflight};
 use gate_infra::httpclient::{exchange_raw, parse_response, request, ClientResponse};
 
 struct Rig {
@@ -540,4 +540,140 @@ fn refused_requests_are_logged_at_a_limited_rate() {
         .filter(|(_, m)| m.contains("refused a request"))
         .count();
     assert!((1..=10).contains(&logged), "{logged}");
+}
+
+/// A server whose preflight refuses every request that has no Authorization header; it counts the
+/// calls of the preflight and of the handler.
+fn rig_with_preflight() -> (Rig, Arc<AtomicUsize>) {
+    let pre_calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&pre_calls);
+    let preflight: Preflight = Arc::new(move |req: &Request| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        assert!(
+            req.body.is_empty(),
+            "the preflight runs before the body is read"
+        );
+        if req.authorization.is_none() {
+            return Some(Response {
+                status: 401,
+                body: b"{\"error\":\"nope\"}".to_vec(),
+                retry_after_secs: None,
+                allow: None,
+                challenge: true,
+            });
+        }
+        None
+    });
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    let handler: Handler = Arc::new(move |req: &Request| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Response {
+            status: 200,
+            body: format!("{{\"len\":{}}}", req.body.len()).into_bytes(),
+            retry_after_secs: None,
+            allow: None,
+            challenge: false,
+        }
+    });
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let log = Arc::new(VecLogger::default());
+    let server = HttpServer::start_with_preflight(
+        listener,
+        HttpLimits::new(1024, 5000, 5000, 16),
+        handler,
+        Some(preflight),
+        log.clone(),
+    )
+    .unwrap();
+    let addr = server.local_addr();
+    (
+        Rig {
+            server,
+            addr,
+            calls,
+            log,
+        },
+        pre_calls,
+    )
+}
+
+#[test]
+fn an_unauthorized_request_is_answered_before_its_body_is_read_or_continued() {
+    let (r, pre_calls) = rig_with_preflight();
+    let mut s = TcpStream::connect(r.addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let started = Instant::now();
+    // announces a body and asks for the go-ahead, and then sends nothing
+    s.write_all(
+        format!(
+            "POST /mcp HTTP/1.1\r\nHost: {}\r\nContent-Length: 1000\r\nExpect: 100-continue\r\n\r\n",
+            r.addr
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    assert!(out.starts_with("HTTP/1.1 401"), "{out:?}");
+    assert!(
+        !out.contains("100 Continue"),
+        "no go-ahead for a client that is not authorized"
+    );
+    assert!(out.contains("Connection: close") && out.contains("WWW-Authenticate"));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(pre_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(r.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn an_unauthorized_request_with_a_body_on_the_wire_is_refused_and_the_connection_closed() {
+    let (r, _) = rig_with_preflight();
+    let mut s = TcpStream::connect(r.addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let smuggled = format!("GET /second HTTP/1.1\r\nHost: {}\r\n\r\n", r.addr);
+    s.write_all(
+        format!(
+            "POST /mcp HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\n\r\n{smuggled}",
+            r.addr,
+            smuggled.len()
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).unwrap();
+    assert_eq!(
+        out.matches("HTTP/1.1 ").count(),
+        1,
+        "one refusal, and the pipelined bytes are not served: {out:?}"
+    );
+    assert!(out.starts_with("HTTP/1.1 401"));
+}
+
+#[test]
+fn an_authorized_request_goes_through_after_the_preflight() {
+    let (r, pre_calls) = rig_with_preflight();
+    let resp = request(
+        r.addr,
+        "POST",
+        "/mcp",
+        &[("Authorization", "Bearer x")],
+        b"12345",
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    assert_eq!(resp.status, 200);
+    assert!(resp.text().contains("\"len\":5"));
+    assert_eq!(
+        (
+            pre_calls.load(Ordering::SeqCst),
+            r.calls.load(Ordering::SeqCst)
+        ),
+        (1, 1)
+    );
 }

@@ -381,6 +381,12 @@ fn error_response(error: HttpError) -> Response {
 
 pub type Handler = Arc<dyn Fn(&Request) -> Response + Send + Sync>;
 
+/// Looks at a request before its body is read (the `body` it sees is empty). A refusal is sent at
+/// once, without `100 Continue` and without reading what the client announced, and the connection
+/// is closed. This is how a client that cannot authenticate is kept from holding a connection and
+/// from making the server buffer a body.
+pub type Preflight = Arc<dyn Fn(&Request) -> Option<Response> + Send + Sync>;
+
 /// Limits how often something is logged: at most `per_minute` messages per minute.
 struct LogThrottle {
     state: Mutex<(Instant, u32, u32)>,
@@ -413,6 +419,7 @@ impl LogThrottle {
 struct Shared {
     limits: HttpLimits,
     handler: Handler,
+    preflight: Option<Preflight>,
     log: Arc<dyn Logger>,
     stop: AtomicBool,
     active: AtomicUsize,
@@ -440,11 +447,22 @@ impl HttpServer {
         handler: Handler,
         log: Arc<dyn Logger>,
     ) -> io::Result<HttpServer> {
+        HttpServer::start_with_preflight(listener, limits, handler, None, log)
+    }
+
+    pub fn start_with_preflight(
+        listener: TcpListener,
+        limits: HttpLimits,
+        handler: Handler,
+        preflight: Option<Preflight>,
+        log: Arc<dyn Logger>,
+    ) -> io::Result<HttpServer> {
         let addr = listener.local_addr()?;
         listener.set_nonblocking(true)?;
         let shared = Arc::new(Shared {
             limits,
             handler,
+            preflight,
             log,
             stop: AtomicBool::new(false),
             active: AtomicUsize::new(0),
@@ -666,6 +684,26 @@ fn serve_connection(mut stream: TcpStream, peer: SocketAddr, shared: &Shared) {
             Ok(f) => f,
             Err(e) => return reject(&mut stream, e),
         };
+        let path = head.target.split('?').next().unwrap_or("").to_string();
+        let mut request = Request {
+            method: method_of(&head.method),
+            path,
+            host: head.header("host").map(str::to_string),
+            origin: head.header("origin").map(str::to_string),
+            authorization: head.header("authorization").map(str::to_string),
+            content_type: head.header("content-type").map(str::to_string),
+            accept: head.joined("accept"),
+            protocol_version: head.header("mcp-protocol-version").map(str::to_string),
+            body: Vec::new(),
+            peer: Some(peer.ip().to_string()),
+        };
+        // before the body: a client that is not welcome gets its answer now, not a go-ahead
+        if let Some(preflight) = &shared.preflight {
+            if let Some(refusal) = preflight(&request) {
+                let _ = write_response(&mut stream, &refusal, false, head.method == "HEAD");
+                return;
+            }
+        }
         // the body
         let total = head_end + framing.content_length;
         if framing.expect_continue
@@ -681,21 +719,8 @@ fn serve_connection(mut stream: TcpStream, peer: SocketAddr, shared: &Shared) {
                 _ => return,
             }
         }
-        let body = buf.get(head_end..total).unwrap_or_default().to_vec();
+        request.body = buf.get(head_end..total).unwrap_or_default().to_vec();
         buf.drain(..total);
-        let path = head.target.split('?').next().unwrap_or("").to_string();
-        let request = Request {
-            method: method_of(&head.method),
-            path,
-            host: head.header("host").map(str::to_string),
-            origin: head.header("origin").map(str::to_string),
-            authorization: head.header("authorization").map(str::to_string),
-            content_type: head.header("content-type").map(str::to_string),
-            accept: head.joined("accept"),
-            protocol_version: head.header("mcp-protocol-version").map(str::to_string),
-            body,
-            peer: Some(peer.ip().to_string()),
-        };
         let response = (shared.handler)(&request);
         let keep_alive = framing.keep_alive && !shared.stop.load(Ordering::SeqCst);
         if write_response(&mut stream, &response, keep_alive, head.method == "HEAD").is_err()
