@@ -13,7 +13,7 @@ use gate_domain::config::Config;
 
 use crate::audit_file::FileAudit;
 use crate::child::ProcessSpawner;
-use crate::http::{Handler, HttpLimits, HttpServer};
+use crate::http::{Handler, HttpLimits, HttpServer, Preflight};
 use crate::system::{FileKillSwitch, StderrLogger, SystemClock};
 
 #[derive(Clone)]
@@ -152,8 +152,16 @@ pub fn start(config: Config, opts: &RunOptions) -> Result<RunningGate, String> {
             return Err(format!("cannot listen on {listen}: {e}"));
         }
     };
+    let early = Arc::clone(&gateway);
     let handler: Handler = Arc::new(move |request| gateway.handle(request));
-    let server = match HttpServer::start(listener, http_limits, handler, Arc::clone(&log)) {
+    let preflight: Preflight = Arc::new(move |request| early.preflight(request));
+    let server = match HttpServer::start_with_preflight(
+        listener,
+        http_limits,
+        handler,
+        Some(preflight),
+        Arc::clone(&log),
+    ) {
         Ok(s) => s,
         Err(e) => {
             upstream.shutdown();

@@ -602,3 +602,43 @@ fn stopping_the_gateway_stops_a_descendant_of_the_server_too() {
     g.running.stop(Duration::from_secs(3));
     wait_for("the descendant to be gone", || !process_exists(sleeper));
 }
+
+#[test]
+fn a_client_without_a_token_gets_its_answer_before_it_has_sent_a_body() {
+    use std::io::{Read, Write};
+    let s = Setup::new("ad-prebody");
+    let g = start_gate(&s);
+    let mut conn = std::net::TcpStream::connect(g.addr).unwrap();
+    conn.set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let started = Instant::now();
+    // announces a 1,000 byte body, asks for the go-ahead and then sends nothing
+    conn.write_all(
+        format!(
+            "POST /mcp HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: 1000\r\nExpect: 100-continue\r\n\r\n",
+            g.addr
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let mut out = String::new();
+    conn.read_to_string(&mut out).unwrap();
+    assert!(out.starts_with("HTTP/1.1 401"), "{out:?}");
+    assert!(!out.contains("100 Continue"));
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    wait_for("the refusal to be audited", || {
+        s.audit_lines()
+            .iter()
+            .any(|l| l.get("reason").and_then(Value::as_str) == Some("missing_token"))
+    });
+    // a client with a token is still served, body and all
+    assert_eq!(
+        post(g.addr, Some(&s.token), &rpc(1, "ping", "{}")).status,
+        200
+    );
+    g.running.stop(Duration::from_secs(3));
+}
