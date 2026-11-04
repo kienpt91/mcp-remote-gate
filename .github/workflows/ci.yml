@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # pinned to a full commit SHA
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain from rust-toolchain.toml
+        # the runner's preinstalled rustup installs the pinned toolchain and components
+        run: rustup show active-toolchain || rustup toolchain install
+      - run: cargo fetch --locked
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # all layers: domain, application, adapters (real sockets and real child processes), end to end and the architecture rules
+      - run: sh scripts/test-layers.sh
+        env:
+          OFFLINE: "0"
+      - run: cargo build --release --locked
+
+  coverage:
+    # Line coverage per layer with rustc's own instrumentation; the script fails below domain 95, application 90, overall 85.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain from rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup component add llvm-tools-preview
+      - run: cargo fetch --locked
+      - run: sh scripts/coverage.sh
+        env:
+          COV_DIR: ${{ runner.temp }}/cov
+
+  release-scripts:
+    # The shell tests of the release scripts; they need only git and a POSIX shell.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sh scripts/test-release.sh
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # full history so the whole history can be scanned
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan the tree
+        run: sh scripts/secret-scan.sh --tree
+      - name: Scan the history
+        run: sh scripts/secret-scan.sh --history
+      - name: Check the tree for tool signatures and personal paths
+        run: sh scripts/hygiene.sh --tree
