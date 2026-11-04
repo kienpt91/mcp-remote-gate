@@ -122,8 +122,10 @@ impl Section {
     }
 }
 
-/// Maps a parsed document to the raw configuration; every problem is collected.
-pub fn raw_config(root: &Table) -> Result<RawConfig, Vec<String>> {
+/// Maps a parsed document to the raw configuration and the problems found on the way (unknown
+/// keys, wrong types). What could be read is returned so that validation can report its own
+/// problems in the same pass.
+pub fn raw_config(root: &Table) -> (RawConfig, Vec<String>) {
     let mut p = Vec::new();
     let mut top = Section::new("", root);
     let mut raw = RawConfig::default();
@@ -221,17 +223,21 @@ pub fn raw_config(root: &Table) -> Result<RawConfig, Vec<String>> {
         t.finish(&mut p);
     }
     top.finish(&mut p);
-    if p.is_empty() {
-        Ok(raw)
-    } else {
-        Err(p)
-    }
+    (raw, p)
 }
 
 /// Parses and validates the text of a configuration file. Relative paths are left as written.
 pub fn parse_config(text: &str) -> Result<Config, Vec<String>> {
     let table = toml::parse(text).map_err(|e| vec![e.to_string()])?;
-    Config::build(raw_config(&table)?)
+    let (raw, mut problems) = raw_config(&table);
+    match Config::build(raw) {
+        Ok(config) if problems.is_empty() => Ok(config),
+        Ok(_) => Err(problems),
+        Err(more) => {
+            problems.extend(more);
+            Err(problems)
+        }
+    }
 }
 
 fn resolve(base: &Path, path: &str) -> String {
