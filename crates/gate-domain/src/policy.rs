@@ -9,15 +9,13 @@ use crate::glob::Glob;
 use crate::json::Value;
 
 /// Name patterns of tools that read and do not change anything, used by the `read_only` preset.
-pub const DEFAULT_READ_PATTERNS: [&str; 12] = [
+pub const DEFAULT_READ_PATTERNS: [&str; 10] = [
     "get_*",
     "list_*",
     "read_*",
     "search_*",
     "find_*",
-    "fetch_*",
     "describe_*",
-    "query_*",
     "show_*",
     "view_*",
     "count_*",
@@ -284,6 +282,33 @@ mod tests {
         );
         let p = policy(&[], &["get_secret"], true);
         assert_eq!(p.decide("get_secret"), Decision::Deny(DenyReason::Denied));
+    }
+
+    #[test]
+    fn names_that_can_run_arbitrary_work_are_not_reads_by_default() {
+        // a tool named query_sql or fetch_and_post may write or send; the operator can add them
+        let p = policy(&[], &[], true);
+        for tool in [
+            "query_sql",
+            "fetch_and_post",
+            "fetch_url",
+            "query_database",
+            "get_or_create_chat",
+        ] {
+            let expected = if tool.starts_with("get_") {
+                Decision::Allow
+            } else {
+                Decision::Deny(DenyReason::NotReadOnly)
+            };
+            assert_eq!(p.decide(tool), expected, "{tool}");
+        }
+        let mut wider = policy(&[], &[], true);
+        wider.read_patterns = globs(&["get_*", "query_*"]);
+        assert_eq!(
+            wider.decide("query_sql"),
+            Decision::Allow,
+            "the operator can widen the preset"
+        );
     }
 
     #[test]

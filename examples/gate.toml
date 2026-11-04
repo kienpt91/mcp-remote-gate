@@ -39,7 +39,7 @@ deny = []
 # THE SWITCH. true: only tools whose names look like reads (get_*, list_*, search_*, ...) are exposed.
 # Set it to false to enable everything that `allow` lets through, sending included.
 read_only = true
-# read_patterns = ["get_*", "list_*", "read_*", "search_*", "find_*", "fetch_*", "describe_*", "query_*", "show_*", "view_*", "count_*", "lookup_*"]
+# read_patterns = ["get_*", "list_*", "read_*", "search_*", "find_*", "describe_*", "show_*", "view_*", "count_*", "lookup_*"]
 
 # Limits on the arguments of matching tools (applied before the call reaches the server).
 # [[tools.rule]]
