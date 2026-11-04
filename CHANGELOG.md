@@ -13,8 +13,11 @@ First version.
 - Defense in depth at the HTTP layer: `Host` and `Origin` checks against DNS rebinding, per-token rate limit, request size limit, a global limit on failed authentications, request deadlines, connection cap, a strict HTTP/1.1 parser (no `Transfer-Encoding`, no duplicate lengths, no folding).
 - Tool policy: default-deny `allow` and `deny` globs on `tools/list` and `tools/call`, a `read_only` preset with configurable read patterns, per-tool argument rules (size, string length, forbidden patterns).
 - Results: `result_max_bytes` (text is cut to fit), `tool_result_prefix` label, bounded lines from the server, the server's `instructions` are not forwarded.
-- Append-only JSON-lines audit log (token id, method, tool, outcome, reason, duration, sizes; arguments only with `log_arguments`, redacted); tool calls are refused while the log cannot be written.
-- Kill switch by file or by SIGUSR1 and SIGUSR2; graceful shutdown on SIGTERM and SIGINT that stops the server's process group.
+- Append-only JSON-lines audit log (token id, method, tool, outcome, reason, duration, sizes; arguments only with `log_arguments`, redacted). An allowed tool call writes an intent line before it is forwarded and is refused with 503 if that write fails; a failed log stays failed until a larger write is proven; the file is opened without following symlinks, owner-checked, kept 0600 and reopened after rotation by rename. Every text field is escaped (control, C1, bidirectional, zero-width).
+- Kill switch by file or by SIGUSR1 and SIGUSR2; graceful shutdown on SIGTERM and SIGINT that stops the server's process group; when the server exits its group is killed before the leader is reaped, so a descendant holding its pipe cannot wedge the gateway.
+- A tool call is forwarded only for a name the server lists (exact match), tool names with whitespace or invisible characters are refused, and the default read patterns leave out `query_*` and `fetch_*`.
+- A client without a valid token is refused before its body is read or `100 Continue` is sent; the default deadline for a request is 5 seconds.
+- The configuration must be owned by the user running the gateway (or root) and not be in a directory that others can write.
 - Refusal to listen on a non-loopback address without `--i-know-this-is-not-tls`.
 - `mcp-remote-gate check` (validate and show what is exposed), `tools` (the real server's tools and the policy's verdict on each), `selftest` (end-to-end proof against the bundled fake server), `init` (annotated example config).
 - Documentation: configuration reference, deployment shapes, handover note template, prompt injection note, ten ADRs, SECURITY.md with the threat model.
