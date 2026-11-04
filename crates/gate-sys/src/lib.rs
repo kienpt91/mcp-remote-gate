@@ -281,7 +281,10 @@ mod tests {
         for _ in 0..100 {
             // SAFETY: kill with signal 0 only checks that the process exists.
             let rc = unsafe { libc::kill(grandchild as libc::pid_t, 0) };
-            if rc != 0 {
+            // a killed process that nobody has reaped yet (init may be a program that does not wait) is a zombie
+            let zombie = std::fs::read_to_string(format!("/proc/{grandchild}/stat"))
+                .is_ok_and(|s| s.contains(") Z"));
+            if rc != 0 || zombie {
                 gone = true;
                 break;
             }
