@@ -133,6 +133,7 @@ fn argument_rules_stop_a_call_before_it_reaches_the_server() {
 fn concurrent_calls_each_get_their_own_answer() {
     let mut s = Setup::new("ad-conc");
     s.tools = "allow = [\"*\"]\nread_only = false\n".into();
+    s.limits.push_str("max_inflight = 64\n");
     let g = start_gate(&s);
     let (addr, token) = (g.addr, s.token.clone());
     let handles: Vec<_> = (0..32)
