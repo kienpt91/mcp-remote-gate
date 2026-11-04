@@ -13,7 +13,7 @@ owner_name='kienpt'
 owner_mail='kienphan.dev@gmail.com'
 
 # The words are assembled from pieces so that this file does not match its own patterns.
-vendors='cla''ude|anth''ropic|open''ai|chat''gpt|gpt-[0-9]|co''pilot|co''dex|gem''ini|cur''sor|aider|windsurf'
+vendors='cla''ude|anth''ropic|open''ai|chat''gpt|gpt-[0-9]|co''pilot|co''dex|gem''ini|cur''sor\.(sh|com)|cur''sor (ai|ide|editor)|aider|windsurf'
 signatures='co-authored-by|signed-off-by|generated (by|with|using)|written (by|with) (an? )?(ai|llm|bot)|ai-generated'
 message_re="($vendors|$signatures)"
 # a home directory of the owner or of a build machine must not leak into the tree
