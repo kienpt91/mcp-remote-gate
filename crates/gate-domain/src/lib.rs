@@ -7,6 +7,7 @@ pub mod auth;
 pub mod framing;
 pub mod glob;
 pub mod hash;
+pub mod hostcheck;
 pub mod json;
 pub mod jsonrpc;
 pub mod policy;
