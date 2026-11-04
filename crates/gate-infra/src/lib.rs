@@ -5,6 +5,7 @@ pub mod audit_file;
 pub mod child;
 pub mod config_file;
 pub mod http;
+pub mod httpclient;
 pub mod system;
 pub mod testutil;
 pub mod toml;
