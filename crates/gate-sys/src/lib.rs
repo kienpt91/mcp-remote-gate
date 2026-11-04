@@ -129,6 +129,35 @@ pub fn signal_group(pgid: u32, signal: Signal) -> io::Result<()> {
     }
 }
 
+/// Whether the child process `pid` has exited, **without reaping it**. A child that has exited but
+/// was not waited for is a zombie: it still holds its process id, and with it the process group of
+/// the same number, so the group can be signalled without the risk that the number now belongs to
+/// somebody else. Once the child is reaped that guarantee is gone.
+pub fn has_exited(pid: u32) -> io::Result<bool> {
+    // SAFETY: an all-zero siginfo_t is a valid value of that plain C struct.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: waitid writes only into `info`, which is valid for the duration of the call; with
+    // WNOHANG it does not block and with WNOWAIT it leaves the child waitable.
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    #[cfg(target_os = "linux")]
+    // SAFETY: the union member is valid after a successful waitid; the struct was zeroed first, so
+    // it reads 0 when no child was in a waitable state.
+    let reported = unsafe { info.si_pid() };
+    #[cfg(not(target_os = "linux"))]
+    let reported = info.si_pid;
+    Ok(reported != 0)
+}
+
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 static KILL_SWITCH: AtomicBool = AtomicBool::new(false);
 
@@ -293,6 +322,44 @@ mod tests {
         assert!(gone, "the grandchild survived the group signal");
         // a group that is gone is not an error
         signal_group(group, Signal::Kill).unwrap();
+    }
+
+    #[test]
+    fn an_exited_child_is_seen_without_being_reaped() {
+        let mut running = Command::new("sleep");
+        running.arg("30");
+        prepare_child(&mut running, Limits::default());
+        let mut running = running.spawn().unwrap();
+        assert!(!has_exited(running.id()).unwrap());
+        signal_group(running.id(), Signal::Kill).unwrap();
+        let _ = running.wait();
+
+        let mut quick = Command::new("sh");
+        quick.args(["-c", "exit 3"]);
+        prepare_child(&mut quick, Limits::default());
+        let mut quick = quick.spawn().unwrap();
+        let mut seen = false;
+        for _ in 0..200 {
+            if has_exited(quick.id()).unwrap() {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(seen, "the exit was not noticed");
+        assert!(
+            has_exited(quick.id()).unwrap(),
+            "asking again still reports the exit: nothing was reaped"
+        );
+        assert_eq!(
+            quick.wait().unwrap().code(),
+            Some(3),
+            "the child could still be waited for"
+        );
+        assert!(
+            has_exited(quick.id()).is_err(),
+            "once reaped there is nothing to ask about"
+        );
     }
 
     #[test]
