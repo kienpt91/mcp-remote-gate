@@ -27,7 +27,7 @@ Copy this file, fill in the bracketed parts and give it to whoever runs the gate
 mcp-remote-gate check --config gate.toml        # the configuration is valid; shows what is exposed
 mcp-remote-gate tools --config gate.toml        # asks the real server for its tools and shows which are exposed
 mcp-remote-gate selftest                        # proves the setup end to end against the bundled fake server
-tail -n 20 audit.jsonl                          # what was asked lately, by which token, allowed or denied
+tail -n 20 audit.jsonl                          # what was asked lately, by which token, allowed or denied (a tool call has two lines: started, then its outcome)
 ```
 
 A request that works: `outcome":"allowed"`. `denied` with a `reason` is the policy doing its job. A burst of `bad_token` is someone guessing.
@@ -77,7 +77,7 @@ To turn sending on, change one line in `gate.toml`:
 read_only = false      # was: true
 ```
 
-and restart. Every tool that `allow` lets through is now callable. To keep some of them off, add them to `deny` (for example `deny = ["delete_*"]`). To limit what a message can carry, add a `[[tools.rule]]` (see `docs/configuration.md`). Sending per token is not supported: a token can only be narrowed (`tools = [...]`), never widened beyond the global policy. To have one client that can send and another that cannot, run a second gateway (second config, second port) with `read_only = false` for the first and keep the other one read-only.
+and restart. Every tool that `allow` lets through is now callable, so **replace `allow = ["*"]` by the exact names the job needs** (for example `allow = ["list_chats", "get_messages", "send_message"]`): everything not named stays off, including tools a later server update adds. A `deny` list on top of `allow = ["*"]` (for example `deny = ["delete_*"]`) is the weaker form, it only blocks what you thought of. Note that `read_only = true` cannot be combined with an allowed write tool: the preset also requires a read-looking name. To limit what a message can carry, add a `[[tools.rule]]` (see `docs/configuration.md`). Sending per token is not supported: a token can only be narrowed (`tools = [...]`), never widened beyond the global policy. To have one client that can send and another that cannot, run a second gateway (second config, second port) with `read_only = false` for the first and keep the other one read-only.
 
 To turn it off again: `read_only = true`, restart. The audit log shows every `send_*` call that was made while it was on.
 

@@ -5,7 +5,7 @@
 Rules that apply to the whole file:
 
 - **Unknown keys are errors.** A typo in `allow` or `deny` must never silently loosen a rule. Every problem is reported in one pass, each with its key (`server.listen`, `token[1].hash`).
-- **The file must not be writable by group or others** (`chmod go-w gate.toml`), because whoever can edit it can widen the tool policy. It may be readable: it holds only token hashes.
+- **The file must not be writable by group or others** (`chmod go-w gate.toml`), must be **owned by the user that runs the gateway (or root)**, and must not be in a directory that group or others can write (a sticky directory like `/tmp` is accepted), because whoever can edit or replace it can widen the tool policy. It may be readable: it holds only token hashes. A symbolic link is judged by the file it points to.
 - **Relative paths** (`audit.path`, `server.kill_switch_file`, `child.cwd`, and a program that starts with `./` or `../`) are taken relative to the directory of the file.
 - **Only a TOML subset is read** (see ADR 4): tables, arrays of tables, strings, integers, booleans, arrays of scalars and single-line inline tables. Floats, dates, multi-line strings and dotted keys are rejected with a line number.
 - The file is at most 256 KiB.
@@ -20,7 +20,7 @@ Rules that apply to the whole file:
 | `allowed_origins` | `[]` | `Origin` values that are accepted, as `https://host[:port]`. Native clients send no `Origin`; a request that has one is refused unless it is listed. The gateway sends no CORS headers, so a listed origin helps non-browser clients only. |
 | `max_request_bytes` | `1048576` | Largest request body (1 KiB to 16 MiB). A larger `Content-Length` is answered with 413 before the body is read. |
 | `request_timeout_ms` | `30000` | How long one call may wait for the upstream server (100 ms to 10 min). |
-| `header_timeout_ms` | `10000` | Time a client has to deliver a complete request, head and body, once it started. A client that sends a byte a second is cut off with 408. |
+| `header_timeout_ms` | `5000` | Time a client has to deliver a complete request, head and body, once it started. A client that sends a byte a second is cut off with 408. |
 | `idle_timeout_ms` | `15000` | How long an idle keep-alive connection is kept. |
 | `max_connections` | `64` | Simultaneous connections; more get 503. |
 | `kill_switch_file` | none | While this file exists, every request is answered with 503. Signals work as well (below). |
@@ -48,10 +48,10 @@ The rule is default-deny. A tool is exposed and callable when it matches `allow`
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `allow` | `[]` | Glob patterns (`*` any run of characters, `?` one character, case-sensitive). **Empty means nothing is allowed**, except that `read_only = true` with an empty `allow` allows the read patterns. |
+| `allow` | `[]` | Glob patterns (`*` any run of characters, `?` one character, case-sensitive). **Empty means nothing is allowed**, except that `read_only = true` with an empty `allow` allows the read patterns. A tool is also forwarded only if the server itself lists a tool with exactly that name (the list is fetched on first use, kept for a minute, and fetched again when an unknown name shows up, at most every five seconds), so a name variant such as `Send_Message` is refused as `tool_not_listed` even if a lenient server would accept it. Tool names with whitespace or invisible characters are refused as invalid. |
 | `deny` | `[]` | Patterns that are never exposed. Deny always wins. |
 | `read_only` | `false` | The preset: also require the name to match `read_patterns`. This is the one-line switch for "sending disabled". |
-| `read_patterns` | `get_*`, `list_*`, `read_*`, `search_*`, `find_*`, `fetch_*`, `describe_*`, `query_*`, `show_*`, `view_*`, `count_*`, `lookup_*` | What counts as a read. Names are the only signal: the gateway cannot tell what a tool does, so check the real names with `mcp-remote-gate tools`. |
+| `read_patterns` | `get_*`, `list_*`, `read_*`, `search_*`, `find_*`, `describe_*`, `show_*`, `view_*`, `count_*`, `lookup_*` | What counts as a read. `query_*` and `fetch_*` are not in the default because such names can run arbitrary work (`query_sql`, `fetch_and_post`); add them if your server's are reads. Names are the only signal: the gateway cannot tell what a tool does, so check the real names with `mcp-remote-gate tools`. |
 | `[[tools.rule]]` | none | Limits on the arguments of the tools matching `tool`: `max_arg_bytes` (serialized `arguments`), `max_string_len` (characters, for every string value and object key) and `forbid_values` (glob patterns; a string value or key that matches is refused). A call that breaks a rule is refused before it reaches the server and the refused value is never echoed in the answer (it is in the audit log only when `log_arguments` is on, redacted). |
 
 Examples:
@@ -67,7 +67,13 @@ read_only = true
 allow = ["*"]
 read_only = false
 
-# everything except what can change the outside world, spelled out
+# an allowlist of the exact tools you need: the strong form (read_only = false, because the preset
+# also requires a read-looking name)
+[tools]
+allow = ["list_chats", "get_messages", "search_messages", "send_message"]
+
+# a denylist: everything the server has EXCEPT what you thought of. Weaker, because a write tool
+# you did not name (or a new one after a server update) is callable. Prefer the allowlist.
 [tools]
 allow = ["*"]
 deny = ["send_*", "delete_*", "post_*", "update_*"]
@@ -100,9 +106,11 @@ forbid_values = ["*://*"]
 | `log_arguments` | `false` | Also write the arguments of `tools/call`, redacted (sensitive key names and credential-shaped strings) and cut to `arguments_max_chars`. Redaction is heuristic: treat the file as sensitive anyway. |
 | `arguments_max_chars` | `512` | |
 
-A line has `v`, `ts`, `token` (the token id, `null` when the request was not authenticated), `peer`, `method`, `tool`, `outcome` (`allowed`, `denied`, `error`), `reason`, `duration_ms`, `request_bytes`, `response_bytes`, and `arguments` and `suppressed` when they apply. Reasons: `ok`, `bad_token`, `missing_token`, `malformed_token`, `host_rejected`, `origin_rejected`, `rate_limited`, `kill_switch`, `not_in_allowlist`, `denylist`, `read_only`, `token_tools`, `scope_missing`, `argument_forbidden`, `argument_string_too_long`, `arguments_too_large`, `bad_params`, `bad_json`, `bad_jsonrpc`, `method_not_allowed`, `upstream_unavailable`, `upstream_error`, `timeout`, `busy`, `result_too_large`, `audit_unavailable` and the HTTP format refusals.
+A line has `v`, `ts`, `token` (the token id, `null` when the request was not authenticated), `peer`, `method`, `tool`, `outcome` (`allowed`, `denied`, `error`), `reason`, `duration_ms`, `request_bytes`, `response_bytes`, and `arguments` and `suppressed` when they apply. Reasons: `ok`, `intent`, `tool_not_listed`, `bad_token`, `missing_token`, `malformed_token`, `host_rejected`, `origin_rejected`, `rate_limited`, `kill_switch`, `not_in_allowlist`, `denylist`, `read_only`, `token_tools`, `scope_missing`, `argument_forbidden`, `argument_string_too_long`, `arguments_too_large`, `bad_params`, `bad_json`, `bad_jsonrpc`, `method_not_allowed`, `upstream_unavailable`, `upstream_error`, `timeout`, `busy`, `result_too_large`, `audit_unavailable` and the HTTP format refusals.
 
-If the audit file cannot be written (disk full), tool calls are refused with 503 until it can, instead of running without a trail. The file is not rotated by the gateway: use `logrotate` with `copytruncate`, or stop the gateway, move the file and start it again.
+**An allowed `tools/call` has two lines**: an *intent* line (`outcome` `started`, `reason` `intent`) that is written, and checked, before the call is forwarded, and the completion line (`allowed` or `error`) when it ends. If the intent cannot be written (disk full, the file replaced by a symbolic link, the directory gone) the call is refused with 503 and the server never hears of it. After a failed write the log stays failed until a recovery line (`"event":"audit_recovered"`, padded to at least 4 KiB) has been written and synced; a half-written line is ended before anything follows it. Lines are not synced one by one.
+
+The file must be a regular file owned by the user that runs the gateway (never a symbolic link); a looser mode on an existing file is changed to 0600 and a warning is logged. The gateway does not rotate the file, but rotation by rename works: before every record the path is compared with the open file, and if it was moved or deleted the path is opened again (this is `logrotate`'s default `create` mode; `copytruncate` also works but can lose lines written between the copy and the truncate).
 
 ## `[[token]]`
 

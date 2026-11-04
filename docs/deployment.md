@@ -43,6 +43,8 @@ server {
 }
 ```
 
+The gateway refuses a client that has no valid token before it reads the body, but every client occupies a connection while its headers are read (5 seconds by default), and there is no per-address limit. **Let the proxy or tunnel enforce its own request header and body timeouts and connection limits** (nginx and Caddy do by default), so that slow or unauthenticated clients are held at the edge, not at the gateway.
+
 Things to check with any proxy: it must pass `Authorization` through, must not add `Transfer-Encoding: chunked` to the request body towards the gateway (the gateway accepts only `Content-Length`; a proxy that buffers request bodies does this by itself), and must not cache responses. Do not let the proxy answer on a path other than the endpoint if you do not want it to.
 
 ## Shape 1b: loopback and a tunnel
@@ -97,7 +99,7 @@ WantedBy=multi-user.target
 
 Put `audit.jsonl` and the kill switch file under the writable path (`audit.path = "/var/lib/mcp-remote-gate/audit.jsonl"`).
 
-The server behind the gateway runs as the same user, with that user's permissions. The gateway limits which tools can be called, not what the server can do once it runs: give the user (or a container) only the access the server needs. For a messaging server that means its own data directory and nothing else.
+If the gateway itself is killed with SIGKILL, only its direct child is killed (Linux); the descendants of the server are not. systemd cleans up the whole control group of the unit when the main process ends (`KillMode=mixed` as above, or `control-group`), which is what closes that gap; without a service manager or a container it stays open. The server behind the gateway runs as the same user, with that user's permissions. The gateway limits which tools can be called, not what the server can do once it runs: give the user (or a container) only the access the server needs. For a messaging server that means its own data directory and nothing else.
 
 ## What to monitor
 
