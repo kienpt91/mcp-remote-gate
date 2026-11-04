@@ -4,6 +4,7 @@
 
 pub mod audit;
 pub mod auth;
+pub mod framing;
 pub mod glob;
 pub mod hash;
 pub mod json;
