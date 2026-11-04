@@ -10,6 +10,7 @@ pub mod hash;
 pub mod hostcheck;
 pub mod json;
 pub mod jsonrpc;
+pub mod mcp;
 pub mod policy;
 pub mod ratelimit;
 pub mod restart;
