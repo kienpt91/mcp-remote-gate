@@ -74,6 +74,19 @@ fn upstream_settings(config: &Config, gate_version: &str) -> UpstreamSettings {
     }
 }
 
+/// Opens the audit log and reports a file whose mode had to be tightened.
+pub fn open_audit(path: &str, log: &dyn Logger) -> Result<Arc<dyn AuditSink>, String> {
+    let audit = FileAudit::open(std::path::Path::new(path))
+        .map_err(|e| format!("cannot open the audit log {path}: {e}"))?;
+    if let Some(mode) = audit.tightened_from() {
+        log.log(
+            gate_app::ports::Level::Warn,
+            &format!("the audit file {path} had mode {mode:03o}; it was changed to 600"),
+        );
+    }
+    Ok(Arc::new(audit))
+}
+
 /// Starts only the upstream server (for `tools`).
 pub fn start_upstream(config: &Config, opts: &RunOptions) -> Result<Arc<StdioUpstream>, String> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock::new());
@@ -100,10 +113,7 @@ pub fn start(config: Config, opts: &RunOptions) -> Result<RunningGate, String> {
         .logger
         .clone()
         .unwrap_or_else(|| Arc::new(StderrLogger::new(Arc::clone(&clock))));
-    let audit: Arc<dyn AuditSink> = Arc::new(
-        FileAudit::open(std::path::Path::new(&config.audit.path))
-            .map_err(|e| format!("cannot open the audit log {}: {e}", config.audit.path))?,
-    );
+    let audit = open_audit(&config.audit.path, log.as_ref())?;
     let kill: Arc<dyn KillSwitch> = Arc::new(FileKillSwitch::new(
         config.server.kill_switch_file.as_ref().map(PathBuf::from),
         opts.use_signals,
@@ -218,6 +228,39 @@ mod tests {
         };
         let e = start(c, &opts).err().unwrap();
         assert!(e.contains("did not start"), "{e}");
+    }
+
+    #[test]
+    fn a_loose_audit_file_is_tightened_and_reported() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::testutil::TempDir::new("rt-mode");
+        let path = dir.write("audit.jsonl", "");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o664)).unwrap();
+        let log = gate_app::testing::VecLogger::default();
+        open_audit(path.to_str().unwrap(), &log).unwrap();
+        assert!(
+            log.contains("had mode 664") && log.contains("changed to 600"),
+            "{:?}",
+            log.lines()
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let quiet = gate_app::testing::VecLogger::default();
+        open_audit(path.to_str().unwrap(), &quiet).unwrap();
+        assert!(quiet.lines().is_empty());
+    }
+
+    #[test]
+    fn an_audit_path_that_is_a_symbolic_link_stops_the_start() {
+        let dir = crate::testutil::TempDir::new("rt-link");
+        let target = dir.write("target.log", "");
+        let link = dir.join("audit.jsonl");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let log = gate_app::testing::VecLogger::default();
+        let e = open_audit(link.to_str().unwrap(), &log).err().unwrap();
+        assert!(e.contains("cannot open the audit log"), "{e}");
     }
 
     #[test]
