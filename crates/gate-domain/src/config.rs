@@ -336,7 +336,7 @@ fn build_server(p: &mut Problems, raw: &RawServer) -> ServerConfig {
         header_timeout_ms: p.int(
             "server.header_timeout_ms",
             raw.header_timeout_ms,
-            10_000,
+            5_000,
             100,
             60_000,
         ) as u64,
@@ -724,6 +724,11 @@ mod tests {
         assert!(c.server.is_loopback());
         assert_eq!(c.server.endpoint, "/mcp");
         assert_eq!(c.server.max_request_bytes, 1_048_576);
+        assert_eq!(
+            (c.server.header_timeout_ms, c.server.idle_timeout_ms),
+            (5_000, 15_000),
+            "clients that have not proved who they are get seconds, not a long wait"
+        );
         assert_eq!(c.server.hosts.hosts().len(), 3);
         assert_eq!(c.server.hosts.check_host(Some("localhost:8787")), Ok(()));
         assert_eq!(
