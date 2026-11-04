@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Read as _, Write as _};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -79,8 +80,9 @@ impl ProcessSpawner {
     }
 }
 
-impl ChildSpawner for ProcessSpawner {
-    fn spawn(&self) -> io::Result<ChildLink> {
+impl ProcessSpawner {
+    /// Like `spawn`, and also returns the concrete control (the tests count its signals).
+    pub(crate) fn spawn_with_control(&self) -> io::Result<(ChildLink, Arc<ProcessControl>)> {
         let mut child = self.command()?.spawn()?;
         let pgid = child.id();
         let (Some(stdin), Some(stdout), Some(stderr)) =
@@ -94,18 +96,28 @@ impl ChildSpawner for ProcessSpawner {
         std::thread::Builder::new()
             .name("upstream-stderr".into())
             .spawn(move || drain_stderr(stderr, log.as_ref()))?;
-        Ok(ChildLink {
+        let control = Arc::new(ProcessControl {
+            state: Mutex::new(ProcState {
+                child: Some(child),
+                exit: None,
+                group_killed: false,
+            }),
+            pgid,
+            grace: Duration::from_millis(self.config.shutdown_grace_ms),
+            signals: AtomicU32::new(0),
+        });
+        let link = ChildLink {
             sink: Box::new(PipeSink { stdin }),
             source: Box::new(PipeSource::new(stdout, self.config.max_line_bytes)),
-            control: Arc::new(ProcessControl {
-                state: Mutex::new(ProcState {
-                    child: Some(child),
-                    exit: None,
-                }),
-                pgid,
-                grace: Duration::from_millis(self.config.shutdown_grace_ms),
-            }),
-        })
+            control: control.clone(),
+        };
+        Ok((link, control))
+    }
+}
+
+impl ChildSpawner for ProcessSpawner {
+    fn spawn(&self) -> io::Result<ChildLink> {
+        self.spawn_with_control().map(|(link, _)| link)
     }
 }
 
@@ -207,12 +219,19 @@ fn drain_stderr(mut stderr: ChildStderr, log: &dyn Logger) {
 struct ProcState {
     child: Option<Child>,
     exit: Option<ExitInfo>,
+    /// SIGKILL was sent to the group while its leader was still unreaped.
+    group_killed: bool,
 }
 
-struct ProcessControl {
+/// The control of one running child. The leader and its process group share a number, and that
+/// number is only safe to signal while the leader has not been reaped (a zombie keeps it taken),
+/// so every signal to the group is sent before the leader is reaped and none after.
+pub(crate) struct ProcessControl {
     state: Mutex<ProcState>,
     pgid: u32,
     grace: Duration,
+    /// How many signals were sent to the group (tests assert that none follow the reaping).
+    signals: AtomicU32,
 }
 
 fn describe(status: ExitStatus) -> ExitInfo {
@@ -232,11 +251,36 @@ fn lock(m: &Mutex<ProcState>) -> MutexGuard<'_, ProcState> {
 }
 
 impl ProcessControl {
-    /// Reaps the leader if it is gone and remembers how it ended.
+    #[cfg(test)]
+    pub(crate) fn signals_sent(&self) -> u32 {
+        self.signals.load(Ordering::SeqCst)
+    }
+
+    fn signal(&self, st: &mut ProcState, signal: Signal) {
+        self.signals.fetch_add(1, Ordering::SeqCst);
+        let _ = signal_group(self.pgid, signal);
+        if signal == Signal::Kill {
+            st.group_killed = true;
+        }
+    }
+
+    /// Notices that the leader has exited, kills whatever else is left in its group (while the
+    /// leader still anchors the group), and only then reaps it and remembers how it ended.
     fn poll_exit(&self) -> bool {
         let mut st = lock(&self.state);
-        if st.exit.is_some() {
+        if st.exit.is_some() || st.child.is_none() {
             return true;
+        }
+        match gate_sys::has_exited(self.pgid) {
+            Ok(false) => return false,
+            Ok(true) => {
+                // a descendant that holds the pipes of the leader would otherwise keep the gateway
+                // waiting for an end of file that never comes
+                if !st.group_killed {
+                    self.signal(&mut st, Signal::Kill);
+                }
+            }
+            Err(_) => {}
         }
         let status = match st.child.as_mut().map(Child::try_wait) {
             Some(Ok(Some(status))) => Some(status),
@@ -249,7 +293,7 @@ impl ProcessControl {
                 st.child = None;
                 true
             }
-            None => st.child.is_none(),
+            None => false,
         }
     }
 }
@@ -257,27 +301,35 @@ impl ProcessControl {
 impl ChildControl for ProcessControl {
     fn terminate(&self) {
         if self.poll_exit() {
-            // the leader is gone; stragglers of its group get the same treatment
-            let _ = signal_group(self.pgid, Signal::Kill);
+            // the leader is gone and the group was cleared when it was reaped
             return;
         }
-        let _ = signal_group(self.pgid, Signal::Term);
+        {
+            let mut st = lock(&self.state);
+            self.signal(&mut st, Signal::Term);
+        }
         let deadline = Instant::now() + self.grace;
         while Instant::now() < deadline {
             if self.poll_exit() {
-                break;
+                return;
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        // whatever survived the polite signal, and anything the leader left behind, is killed
-        let _ = signal_group(self.pgid, Signal::Kill);
+        // the leader outlived the polite signal and is still unreaped, so its number is still ours
+        {
+            let mut st = lock(&self.state);
+            if !st.group_killed {
+                self.signal(&mut st, Signal::Kill);
+            }
+        }
+        let reap_deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < reap_deadline && !self.poll_exit() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn wait(&self) -> ExitInfo {
-        loop {
-            if self.poll_exit() {
-                break;
-            }
+        while !self.poll_exit() {
             std::thread::sleep(Duration::from_millis(10));
         }
         lock(&self.state).exit.clone().unwrap_or(ExitInfo {
@@ -506,6 +558,89 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(exit.description.contains("signal 9"), "{exit:?}");
         link.control.terminate();
+    }
+
+    /// Runs `f` on a thread and fails the test instead of hanging when it does not finish.
+    fn within<T: Send + 'static>(
+        secs: u64,
+        what: &str,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(Duration::from_secs(secs))
+            .unwrap_or_else(|_| panic!("timed out: {what}"))
+    }
+
+    fn spawn_concrete(command: &[&str]) -> (ChildLink, Arc<ProcessControl>) {
+        let log = Arc::new(VecLogger::default());
+        ProcessSpawner::new(config(command), log)
+            .spawn_with_control()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_descendant_holding_stdout_is_killed_when_the_leader_exits() {
+        // the leader exits at once; a background sleep inherited the pipe and would hold it for a minute
+        let (mut link, _) = spawn(&["sh", "-c", "sleep 60 & echo $!; exit 0"]);
+        let Read::Line(Line::Complete(pid)) = link.source.next() else {
+            panic!()
+        };
+        let pid: u32 = String::from_utf8(pid).unwrap().trim().parse().unwrap();
+        let control = Arc::clone(&link.control);
+        let exit = within(10, "the leader's exit is seen", move || control.wait());
+        assert_eq!(
+            (exit.clean, exit.description.as_str()),
+            (true, "exit status 0")
+        );
+        let end = within(
+            10,
+            "the pipe is released once the group is killed",
+            move || link.source.next(),
+        );
+        assert_eq!(end, Read::Eof);
+        let mut gone = false;
+        for _ in 0..100 {
+            if !std::path::Path::new(&format!("/proc/{pid}")).exists()
+                || std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .is_ok_and(|s| s.contains(") Z"))
+            {
+                gone = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(gone, "the descendant {pid} survived the exit of its leader");
+    }
+
+    #[test]
+    fn no_signal_is_sent_to_a_group_after_its_leader_was_reaped() {
+        let (link, control) = spawn_concrete(&["sh", "-c", "exit 0"]);
+        let exit = link.control.wait();
+        assert!(exit.clean);
+        let before = control.signals_sent();
+        link.control.terminate();
+        link.control.terminate();
+        assert_eq!(
+            control.signals_sent(),
+            before,
+            "the process id may belong to somebody else by now"
+        );
+    }
+
+    #[test]
+    fn a_leader_that_ignores_term_is_killed_while_it_still_anchors_its_group() {
+        let (link, control) =
+            spawn_concrete(&["sh", "-c", "trap '' TERM; while :; do sleep 1; done"]);
+        std::thread::sleep(Duration::from_millis(200));
+        link.control.terminate();
+        // one TERM and one KILL, both sent before the leader was reaped, and nothing after it
+        assert_eq!(control.signals_sent(), 2);
+        assert!(link.control.wait().description.contains("signal 9"));
+        link.control.terminate();
+        assert_eq!(control.signals_sent(), 2);
     }
 
     #[test]
