@@ -8,7 +8,9 @@
 pub mod args;
 mod check;
 mod init;
+mod serve;
 mod token;
+mod tools;
 
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -84,7 +86,9 @@ pub fn run(args: &[String], io: &mut Io<'_>) -> i32 {
         return USAGE;
     };
     match command.as_str() {
+        "run" => serve::run(rest, io),
         "check" => check::run(rest, io),
+        "tools" => tools::run(rest, io),
         "token" => token::run(rest, io),
         "init" => init::run(rest, io),
         "version" | "--version" | "-V" => {
@@ -152,7 +156,16 @@ mod tests {
         assert!(err.contains("unknown command frobnicate"));
     }
 
-        #[test]
+    #[test]
+    fn a_missing_config_flag_is_a_usage_error() {
+        for cmd in ["run", "check", "tools"] {
+            let (code, _, err) = run_captured(&[cmd], "");
+            assert_eq!(code, USAGE, "{cmd}");
+            assert!(err.contains("--config is required"));
+        }
+    }
+
+    #[test]
     fn an_unreadable_config_is_reported() {
         let (code, _, err) = run_captured(&["check", "--config", "/nonexistent/gate.toml"], "");
         assert_eq!(code, USAGE);
