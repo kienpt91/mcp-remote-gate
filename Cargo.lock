@@ -12,3 +12,16 @@ dependencies = [
 [[package]]
 name = "gate-domain"
 version = "0.1.0"
+
+[[package]]
+name = "gate-sys"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "libc"
+version = "0.2.190"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"

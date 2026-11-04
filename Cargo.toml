@@ -3,6 +3,7 @@ resolver = "2"
 members = [
   "crates/gate-domain",
   "crates/gate-app",
+  "crates/gate-sys",
 ]
 
 [workspace.package]
