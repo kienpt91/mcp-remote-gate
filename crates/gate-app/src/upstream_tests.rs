@@ -443,3 +443,53 @@ fn shutdown_fails_waiting_calls_and_later_ones() {
     assert_eq!(up.status(), "Stopped");
     up.shutdown();
 }
+
+#[test]
+fn an_oversized_line_with_an_id_deep_inside_does_not_fail_another_call() {
+    // the child answers the call to "big" with an oversized line whose result comes first and holds
+    // the id of the call that is waiting in "slow": only the timeout of each may end them
+    let spawner = ScriptedSpawner::always(|| {
+        let mut inner = mcp_behavior(&["slow", "big"]);
+        Box::new(move |msg: &Value| {
+            let is_big = msg
+                .get("params")
+                .and_then(|p| p.get("name"))
+                .and_then(Value::as_str)
+                == Some("big");
+            if is_big {
+                // gateway ids: 1 is the handshake, 2 the call to "slow", 3 this call
+                let head =
+                    br#"{"jsonrpc":"2.0","result":{"structuredContent":{"id":2,"rows":[1,2,3"#
+                        .to_vec();
+                return vec![ChildAction::Event(Read::Line(Line::Oversize {
+                    head,
+                    len: 9_000_000,
+                }))];
+            }
+            inner(msg)
+        })
+    });
+    let up = Arc::new(
+        start(spawner, settings(RestartMode::Never, 0, 8))
+            .0
+            .unwrap(),
+    );
+    let slow = {
+        let up = Arc::clone(&up);
+        std::thread::spawn(move || up.request("tools/call", Some(call_params("slow", "{}")), 900))
+    };
+    std::thread::sleep(Duration::from_millis(150));
+    let big = up.request("tools/call", Some(call_params("big", "{}")), 300);
+    assert_eq!(
+        big,
+        Err(UpstreamError::Timeout),
+        "a line that cannot be matched is dropped and the timeout applies"
+    );
+    assert_eq!(
+        slow.join().unwrap(),
+        Err(UpstreamError::Timeout),
+        "the other call ends by its own timeout, not with a too-large error"
+    );
+    assert_eq!(up.stats().oversized_lines, 1);
+    up.shutdown();
+}

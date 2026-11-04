@@ -627,19 +627,77 @@ fn handle_line(shared: &Shared, bytes: &[u8], writer: &SyncSender<Vec<u8>>) {
     }
 }
 
-/// The numeric `"id"` near the start of a line that was too long to parse. Only used to fail the
-/// matching call early instead of letting it time out.
+/// The numeric `"id"` of a line that was too long to parse, read only from the top-level members
+/// that come before any nested value: `{"jsonrpc":"2.0","id":7,...`. An `"id"` deeper in the
+/// line (structured content, a string) is not the id of the message, so it is never looked at.
+/// Used only to fail the matching call early instead of letting it time out; `None` means the
+/// line is dropped and the timeout applies.
 fn leading_id(head: &[u8]) -> Option<u64> {
-    const NEEDLE: &[u8] = b"\"id\":";
-    let at = head.windows(NEEDLE.len()).position(|w| w == NEEDLE)?;
-    let rest = head.get(at + NEEDLE.len()..)?;
-    let digits: Vec<u8> = rest
-        .iter()
-        .copied()
-        .skip_while(|b| *b == b' ')
-        .take_while(u8::is_ascii_digit)
-        .collect();
-    std::str::from_utf8(&digits).ok()?.parse().ok()
+    let mut at = 0usize;
+    let blank = |at: &mut usize| {
+        while matches!(head.get(*at), Some(b' ' | b'\t')) {
+            *at += 1;
+        }
+    };
+    let expect = |at: &mut usize, byte: u8| -> Option<()> {
+        if head.get(*at) == Some(&byte) {
+            *at += 1;
+            Some(())
+        } else {
+            None
+        }
+    };
+    // a string without escapes (keys) or with them (simple values); returns its content range
+    let string = |at: &mut usize| -> Option<(usize, usize)> {
+        if head.get(*at) != Some(&b'"') {
+            return None;
+        }
+        *at += 1;
+        let start = *at;
+        loop {
+            match head.get(*at)? {
+                b'"' => {
+                    *at += 1;
+                    return Some((start, *at - 1));
+                }
+                b'\\' => *at += 2,
+                _ => *at += 1,
+            }
+        }
+    };
+    blank(&mut at);
+    expect(&mut at, b'{')?;
+    loop {
+        blank(&mut at);
+        let (k0, k1) = string(&mut at)?;
+        blank(&mut at);
+        expect(&mut at, b':')?;
+        blank(&mut at);
+        if head.get(k0..k1)? == b"id" {
+            let start = at;
+            while matches!(head.get(at), Some(b'0'..=b'9')) {
+                at += 1;
+            }
+            // the number must end inside the head, and end as an integer
+            if at == start || !matches!(head.get(at)?, b',' | b'}' | b' ' | b'\t') {
+                return None;
+            }
+            return std::str::from_utf8(head.get(start..at)?).ok()?.parse().ok();
+        }
+        match head.get(at)? {
+            b'"' => {
+                string(&mut at)?;
+            }
+            b'{' | b'[' => return None,
+            _ => {
+                while !matches!(head.get(at)?, b',' | b'}' | b' ' | b'\t') {
+                    at += 1;
+                }
+            }
+        }
+        blank(&mut at);
+        expect(&mut at, b',')?;
+    }
 }
 
 #[cfg(test)]
@@ -652,13 +710,36 @@ mod tests {
             leading_id(br#"{"jsonrpc":"2.0","id":42,"result":{"#),
             Some(42)
         );
-        assert_eq!(leading_id(br#"{"id": 7,"jsonrpc":"2.0"#), Some(7));
+        assert_eq!(leading_id(br#"{ "id" : 7 , "jsonrpc":"2.0"#), Some(7));
+        assert_eq!(leading_id(br#"{"id":7}"#), Some(7));
         assert_eq!(
             leading_id(br#"{"jsonrpc":"2.0","id":"abc","result":{"#),
             None
         );
         assert_eq!(leading_id(br#"{"jsonrpc":"2.0","result":{"#), None);
         assert_eq!(leading_id(br#"{"id":99999999999999999999999"#), None);
+        assert_eq!(
+            leading_id(br#"{"id":4"#),
+            None,
+            "a number that may continue is not an id"
+        );
+        assert_eq!(leading_id(br#"{"id":4.5,"#), None);
+        assert_eq!(leading_id(br#"{"id":-4,"#), None);
         assert_eq!(leading_id(b""), None);
+    }
+
+    #[test]
+    fn an_id_inside_a_nested_value_is_not_the_id_of_the_message() {
+        // the result comes first, and a structured payload has an "id" of its own
+        for head in [
+            br#"{"jsonrpc":"2.0","result":{"content":[{"type":"text","text":"x"}],"structuredContent":{"id":3,"n":1"#.as_slice(),
+            br#"{"result":{"id":3,"#.as_slice(),
+            br#"{"jsonrpc":"2.0","params":[{"id":3}],"id":4,"#.as_slice(),
+            br#"{"jsonrpc":"2.0","result":"a \"id\":3 inside a string","#.as_slice(),
+            br#"{"jsonrpc":"2.0","result":"{\"id\":3}","#.as_slice(),
+            br#"[{"id":3}"#.as_slice(),
+        ] {
+            assert_eq!(leading_id(head), None, "{}", String::from_utf8_lossy(head));
+        }
     }
 }
