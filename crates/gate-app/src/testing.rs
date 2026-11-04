@@ -3,7 +3,7 @@
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use gate_domain::audit::AuditRecord;
 use gate_domain::framing::Line;
@@ -293,21 +293,54 @@ impl LineSource for ScriptSource {
     }
 }
 
+/// How the fake process ended; `wait` blocks until it did, like waiting for a real process.
+#[derive(Default)]
+struct ExitCell {
+    info: Mutex<Option<ExitInfo>>,
+    ended: Condvar,
+}
+
+impl ExitCell {
+    /// Records how the process ended unless it already did.
+    fn set(&self, info: ExitInfo) {
+        let mut slot = lock(&self.info);
+        if slot.is_none() {
+            *slot = Some(info);
+        }
+        drop(slot);
+        self.ended.notify_all();
+    }
+
+    fn wait(&self) -> ExitInfo {
+        let mut slot = lock(&self.info);
+        loop {
+            if let Some(info) = slot.clone() {
+                return info;
+            }
+            slot = self
+                .ended
+                .wait(slot)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+}
+
 struct ScriptControl {
     out: Mutex<Sender<Read>>,
-    exit: Arc<Mutex<Option<ExitInfo>>>,
+    exit: Arc<ExitCell>,
 }
 
 impl ChildControl for ScriptControl {
     fn terminate(&self) {
         let _ = lock(&self.out).send(Read::Eof);
+        self.exit.set(ExitInfo {
+            clean: false,
+            description: "terminated".into(),
+        });
     }
 
     fn wait(&self) -> ExitInfo {
-        lock(&self.exit).clone().unwrap_or(ExitInfo {
-            clean: false,
-            description: "terminated".into(),
-        })
+        self.exit.wait()
     }
 }
 
@@ -317,7 +350,7 @@ impl ChildSpawner for ScriptedSpawner {
         let mut behavior = (lock(&self.make))(index).map_err(io::Error::other)?;
         let (to_child, child_in) = channel::<Vec<u8>>();
         let (child_out, from_child) = channel::<Read>();
-        let exit = Arc::new(Mutex::new(None));
+        let exit = Arc::new(ExitCell::default());
         let received = Arc::clone(&self.received);
         let thread_out = child_out.clone();
         let thread_exit = Arc::clone(&exit);
@@ -337,7 +370,7 @@ impl ChildSpawner for ScriptedSpawner {
                             let _ = thread_out.send(event);
                         }
                         ChildAction::Exit { clean } => {
-                            *lock(&thread_exit) = Some(ExitInfo {
+                            thread_exit.set(ExitInfo {
                                 clean,
                                 description: if clean {
                                     "exit status 0".into()
