@@ -19,6 +19,14 @@ impl RestartMode {
             _ => None,
         }
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RestartMode::Never => "never",
+            RestartMode::OnFailure => "on-failure",
+            RestartMode::Always => "always",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +96,13 @@ mod tests {
         );
         assert_eq!(RestartMode::parse("always"), Some(RestartMode::Always));
         assert_eq!(RestartMode::parse("sometimes"), None);
+        for mode in [
+            RestartMode::Never,
+            RestartMode::OnFailure,
+            RestartMode::Always,
+        ] {
+            assert_eq!(RestartMode::parse(mode.as_str()), Some(mode));
+        }
     }
 
     #[test]
