@@ -539,3 +539,57 @@ fn a_flood_of_bad_requests_does_not_stop_a_good_client() {
     );
     g.running.stop(Duration::from_secs(3));
 }
+
+#[test]
+fn a_descendant_that_holds_the_pipe_does_not_wedge_the_gateway_after_a_crash() {
+    let mut s = Setup::new("ad-held");
+    s.tools = "allow = [\"*\"]\nread_only = false\n".into();
+    s.child_extra = "restart = \"on-failure\"\nmax_restarts = 3\nrestart_backoff_ms = 50\n".into();
+    let pidfile = s.path("sleep.pid");
+    // a background sleep inherits the child's standard output and outlives the server
+    s.command = Some(format!(
+        "[\"sh\", \"-c\", \"sleep 300 & echo $! > {}; exec \\\"$0\\\" \\\"$@\\\"\", \"{EXE}\", \"fake-mcp\"]",
+        pidfile.display()
+    ));
+    let g = start_gate(&s);
+    let sleeper: u32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(process_exists(sleeper));
+    let started = Instant::now();
+    assert_eq!(call_tool(g.addr, &s.token, "crash", "{}").status, 503);
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "the call fails when the server dies, not when its timeout ends: {:?}",
+        started.elapsed()
+    );
+    wait_for("the restart", || {
+        call_tool(g.addr, &s.token, "echo", "{}").status == 200
+    });
+    assert!(g.running.upstream_stats().restarts >= 1);
+    wait_for("the old sleeper to be killed with its group", || {
+        !process_exists(sleeper)
+    });
+    g.running.stop(Duration::from_secs(3));
+}
+
+#[test]
+fn stopping_the_gateway_stops_a_descendant_of_the_server_too() {
+    let mut s = Setup::new("ad-desc");
+    let pidfile = s.path("sleep.pid");
+    s.command = Some(format!(
+        "[\"sh\", \"-c\", \"sleep 300 & echo $! > {}; exec \\\"$0\\\" \\\"$@\\\"\", \"{EXE}\", \"fake-mcp\"]",
+        pidfile.display()
+    ));
+    let g = start_gate(&s);
+    let sleeper: u32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(process_exists(sleeper));
+    g.running.stop(Duration::from_secs(3));
+    wait_for("the descendant to be gone", || !process_exists(sleeper));
+}

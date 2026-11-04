@@ -482,6 +482,14 @@ fn run_generation(shared: &Arc<Shared>, link: ChildLink) -> ExitInfo {
     if stopping(shared) {
         control.terminate();
     }
+    // Watches the leader: when it exits, the control kills what is left of its group, which releases
+    // the pipes a descendant may be holding, so the reader below always reaches the end of its stream.
+    let watcher = {
+        let control = Arc::clone(&control);
+        std::thread::Builder::new()
+            .name("upstream-watcher".into())
+            .spawn(move || control.wait())
+    };
     let reader = {
         let shared = Arc::clone(shared);
         let wtx = wtx.clone();
@@ -539,6 +547,9 @@ fn run_generation(shared: &Arc<Shared>, link: ChildLink) -> ExitInfo {
     }
     control.terminate();
     let exit = control.wait();
+    if let Ok(watcher) = watcher {
+        let _ = watcher.join();
+    }
     {
         let mut st = lock(&shared.state);
         st.writer = None;
