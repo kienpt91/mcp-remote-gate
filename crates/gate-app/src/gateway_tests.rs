@@ -877,3 +877,72 @@ fn a_hostile_tool_name_cannot_forge_a_log_line() {
         assert!(!line.contains('\n') && !line.contains('\u{1b}'));
     }
 }
+
+#[test]
+fn property_arbitrary_bodies_never_crash_and_never_reach_the_server_by_accident() {
+    let mut cfg = config();
+    cfg.burst = 100_000;
+    cfg.requests_per_minute = 100_000;
+    let r = rig_with(
+        cfg,
+        policy(),
+        FakeUpstream::with_tools(&["get_chats", "send_message"]),
+    );
+    let mut x = 0x7777_aaaa_5555_cccc_u64;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let pieces = [
+        "{",
+        "}",
+        "[",
+        "]",
+        "\"",
+        ":",
+        ",",
+        "\"jsonrpc\"",
+        "\"2.0\"",
+        "\"id\"",
+        "1",
+        "\"method\"",
+        "\"tools/call\"",
+        "\"tools/list\"",
+        "\"params\"",
+        "\"name\"",
+        "\"send_message\"",
+        "\"get_chats\"",
+        "\"arguments\"",
+        "null",
+        "true",
+        "\\u0000",
+        " ",
+        "\n",
+        "é",
+    ];
+    for _ in 0..4000 {
+        let text: String = (0..next() % 24)
+            .map(|_| pieces[(next() % pieces.len() as u64) as usize])
+            .collect();
+        let resp = r.gateway.handle(&post(Some(&r.full_token), &text));
+        assert!(
+            matches!(resp.status, 200 | 202 | 400),
+            "{text}: {}",
+            resp.status
+        );
+    }
+    for (method, params) in r.upstream.calls() {
+        // only requests that passed every check were forwarded, and never a tool the policy denies
+        assert!(method == "tools/list" || method == "tools/call");
+        if method == "tools/call" {
+            let name = params
+                .as_ref()
+                .and_then(|p| p.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            assert_ne!(name, "send_message", "a denied tool reached the upstream");
+        }
+    }
+}
