@@ -9,3 +9,4 @@ pub mod json;
 pub mod jsonrpc;
 pub mod policy;
 pub mod ratelimit;
+pub mod sanitize;
