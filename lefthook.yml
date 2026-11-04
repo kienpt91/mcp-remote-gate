@@ -1,0 +1,17 @@
+# Git hooks (https://github.com/evilmartians/lefthook). Install once per clone with `lefthook install`.
+pre-commit:
+  commands:
+    secret-scan:
+      run: sh scripts/secret-scan.sh --staged
+
+commit-msg:
+  commands:
+    message-hygiene:
+      run: sh scripts/hygiene.sh --msg {1}
+
+pre-push:
+  commands:
+    secret-scan:
+      run: sh scripts/secret-scan.sh --tree
+    hygiene:
+      run: sh scripts/hygiene.sh --tree && sh scripts/hygiene.sh --history
