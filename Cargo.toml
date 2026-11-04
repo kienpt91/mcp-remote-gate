@@ -4,6 +4,7 @@ members = [
   "crates/gate-domain",
   "crates/gate-app",
   "crates/gate-sys",
+  "crates/gate-infra",
 ]
 
 [workspace.package]

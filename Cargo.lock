@@ -14,6 +14,15 @@ name = "gate-domain"
 version = "0.1.0"
 
 [[package]]
+name = "gate-infra"
+version = "0.1.0"
+dependencies = [
+ "gate-app",
+ "gate-domain",
+ "gate-sys",
+]
+
+[[package]]
 name = "gate-sys"
 version = "0.1.0"
 dependencies = [
