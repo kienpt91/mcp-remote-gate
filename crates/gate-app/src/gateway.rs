@@ -114,7 +114,25 @@ pub struct Gateway {
     token_limits: Mutex<RateLimiter>,
     failed_auth: Mutex<RateLimiter>,
     unauth_log: Mutex<UnauthLog>,
+    known_tools: Mutex<KnownTools>,
 }
+
+/// The tool names the upstream server lists. A `tools/call` is forwarded only for a name that is in
+/// this set, so a variant of an allowed or denied name (another case, a stray character) that the
+/// server might still accept never reaches it.
+#[derive(Default)]
+struct KnownTools {
+    names: std::collections::HashSet<String>,
+    /// When the list was last fetched (monotonic ms); `None` before the first fetch.
+    fetched_at: Option<u64>,
+}
+
+/// How long a fetched tool list is trusted.
+const TOOL_LIST_TTL_MS: u64 = 60_000;
+/// How soon a name that is not in the list may cause the list to be fetched again.
+const TOOL_LIST_MIN_REFRESH_MS: u64 = 5_000;
+/// The most pages of a tool list that are read.
+const TOOL_LIST_MAX_PAGES: usize = 20;
 
 /// Audit lines of unauthenticated requests are limited, so that a flood of bad requests cannot
 /// fill the disk; the number of dropped lines is reported on the next line that passes.
@@ -212,6 +230,7 @@ impl Gateway {
         Gateway {
             token_limits: Mutex::new(RateLimiter::new(cfg.requests_per_minute, cfg.burst)),
             failed_auth: Mutex::new(RateLimiter::new(failed, failed)),
+            known_tools: Mutex::new(KnownTools::default()),
             unauth_log: Mutex::new(UnauthLog {
                 limiter: RateLimiter::new(60, 30),
                 suppressed: 0,
@@ -549,6 +568,22 @@ impl Gateway {
                 rpc_error(id, jsonrpc::FORBIDDEN, &message),
             );
         }
+        match self.is_listed(call.name) {
+            Ok(true) => {}
+            Ok(false) => {
+                return self.finish(
+                    ctx,
+                    Outcome::Denied,
+                    "tool_not_listed",
+                    rpc_error(
+                        id,
+                        jsonrpc::INVALID_PARAMS,
+                        "the server has no tool with this name",
+                    ),
+                );
+            }
+            Err(e) => return self.upstream_failure(ctx, id, &e),
+        }
         // The intent is on record before the server hears of the call: if it cannot be written the
         // call does not happen, and if the gateway or the machine dies during the call the log still
         // says that it was started. The completion record follows in `finish`.
@@ -603,6 +638,60 @@ impl Gateway {
             }
             Err(e) => self.upstream_failure(ctx, id, &e),
         }
+    }
+
+    /// Whether the upstream server lists a tool with exactly this name. The list is fetched on
+    /// first use and kept for a minute; a name that is not in it makes the gateway look again, but
+    /// not more than once every few seconds, so a stream of unknown names costs one listing.
+    fn is_listed(&self, name: &str) -> Result<bool, UpstreamError> {
+        let now = self.ports.clock.mono_ms();
+        {
+            let known = lock(&self.known_tools);
+            if let Some(at) = known.fetched_at {
+                let age = now.saturating_sub(at);
+                if age < TOOL_LIST_TTL_MS {
+                    if known.names.contains(name) {
+                        return Ok(true);
+                    }
+                    if age < TOOL_LIST_MIN_REFRESH_MS {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        let names = self.fetch_tool_names()?;
+        let listed = names.contains(name);
+        let mut known = lock(&self.known_tools);
+        known.names = names;
+        known.fetched_at = Some(now);
+        Ok(listed)
+    }
+
+    fn fetch_tool_names(&self) -> Result<std::collections::HashSet<String>, UpstreamError> {
+        let mut names = std::collections::HashSet::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..TOOL_LIST_MAX_PAGES {
+            let params = cursor
+                .as_deref()
+                .map(|c| Value::object([("cursor", Value::str(c))]));
+            let page =
+                self.ports
+                    .upstream
+                    .request("tools/list", params, self.cfg.request_timeout_ms)?;
+            if let Some(tools) = page.get("tools").and_then(Value::as_array) {
+                names.extend(
+                    tools
+                        .iter()
+                        .filter_map(|t| t.get("name").and_then(Value::as_str))
+                        .map(str::to_string),
+                );
+            }
+            match page.get("nextCursor").and_then(Value::as_str) {
+                Some(next) if !next.is_empty() => cursor = Some(next.to_string()),
+                _ => break,
+            }
+        }
+        Ok(names)
     }
 
     fn upstream_failure(&self, ctx: &Ctx<'_>, id: &Value, error: &UpstreamError) -> Response {

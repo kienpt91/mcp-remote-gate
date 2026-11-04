@@ -260,8 +260,7 @@ fn an_allowed_call_reaches_the_server_with_a_rebuilt_request() {
         Some(&Value::int(9)),
         "the id of the client is restored"
     );
-    let (method, params) = r.upstream.calls().remove(0);
-    assert_eq!(method, "tools/call");
+    let params = r.upstream.tool_calls().remove(0);
     assert_eq!(
         params.unwrap().to_json(),
         r#"{"name":"get_chats","arguments":{"limit":2}}"#
@@ -309,7 +308,7 @@ fn switching_read_only_off_enables_sending() {
         .gateway
         .handle(&post(Some(&r.full_token), &call("send_message", "{}")));
     assert!(body(&resp).get("result").is_some());
-    assert_eq!(r.upstream.calls().len(), 1);
+    assert_eq!(r.upstream.tool_calls().len(), 1);
 }
 
 #[test]
@@ -383,7 +382,7 @@ fn argument_rules_are_enforced_before_the_call() {
             "the refused value is not echoed"
         );
     }
-    assert_eq!(r.upstream.calls().len(), 1);
+    assert_eq!(r.upstream.tool_calls().len(), 1);
 }
 
 #[test]
@@ -733,7 +732,7 @@ fn results_get_a_label_and_a_size_cap() {
     cfg.result_max_bytes = Some(1200);
     cfg.tool_result_prefix = Some("[untrusted tool output] ".into());
     let big = "x".repeat(10_000);
-    let upstream = FakeUpstream::new(move |_, _| {
+    let upstream = FakeUpstream::listing(&["get_chats"], move |_, _| {
         Ok(Value::object([(
             "content",
             Value::Array(vec![Value::object([
@@ -760,7 +759,7 @@ fn results_get_a_label_and_a_size_cap() {
             ..config()
         },
         policy(),
-        FakeUpstream::new(|_, _| {
+        FakeUpstream::listing(&["get_chats"], |_, _| {
             Ok(Value::object([(
                 "structuredContent",
                 Value::String("y".repeat(5000)),
@@ -856,7 +855,7 @@ fn when_the_audit_log_cannot_be_written_tool_calls_stop_but_the_rest_goes_on() {
         .handle(&post(Some(&r.full_token), &call("get_chats", "{}")));
     assert_eq!(resp.status, 503);
     assert!(
-        r.upstream.calls().is_empty(),
+        r.upstream.tool_calls().is_empty(),
         "no call runs without a trail"
     );
     assert_eq!(
@@ -984,7 +983,7 @@ fn an_intent_record_is_on_disk_before_the_call_reaches_the_server() {
     let seen_by_the_server: Arc<std::sync::Mutex<Vec<gate_domain::audit::AuditRecord>>> =
         Arc::default();
     let (for_server, snapshot) = (Arc::clone(&audit), Arc::clone(&seen_by_the_server));
-    let upstream = FakeUpstream::new(move |_, _| {
+    let upstream = FakeUpstream::listing(&["get_chats"], move |_, _| {
         // what the audit log holds at the moment the server is asked
         *snapshot.lock().unwrap() = for_server.records();
         Ok(Value::object([(
@@ -1031,7 +1030,7 @@ fn a_call_that_never_completes_still_leaves_its_intent() {
     let r = rig_with(
         config(),
         p,
-        FakeUpstream::new(|_, _| Err(UpstreamError::Timeout)),
+        FakeUpstream::listing(&["get_chats"], |_, _| Err(UpstreamError::Timeout)),
     );
     r.gateway
         .handle(&post(Some(&r.full_token), &call("get_chats", "{}")));
@@ -1063,7 +1062,7 @@ fn the_first_failed_write_already_refuses_the_call() {
     assert_eq!(resp.status, 503);
     assert_eq!(resp.retry_after_secs, Some(30));
     assert!(
-        r.upstream.calls().is_empty(),
+        r.upstream.tool_calls().is_empty(),
         "the call never reached the server"
     );
     assert!(r.log.contains("cannot write the audit log"));
@@ -1084,4 +1083,265 @@ fn requests_that_never_reach_the_server_have_a_single_record() {
         .records()
         .iter()
         .all(|rec| rec.outcome != Outcome::Started));
+}
+
+/// Locks without an unwrap: a poisoned lock still holds usable data in these tests.
+fn locked<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// An upstream whose tool list can change, that records what it was asked, and that, like a server
+/// which normalises names, would run \`Send_Message\` as \`send_message\`.
+fn lenient_server(
+    tools: Arc<std::sync::Mutex<Vec<String>>>,
+    ran: Arc<std::sync::Mutex<Vec<String>>>,
+    page_size: usize,
+) -> FakeUpstream {
+    FakeUpstream::new(move |method, params| match method {
+        "tools/list" => {
+            let all = locked(&tools).clone();
+            let start = params
+                .and_then(|p| p.get("cursor"))
+                .and_then(Value::as_str)
+                .and_then(|c| c.parse::<usize>().ok())
+                .unwrap_or(0);
+            let page: Vec<Value> = all
+                .iter()
+                .skip(start)
+                .take(page_size)
+                .map(|n| Value::object([("name", Value::str(n))]))
+                .collect();
+            let mut result = Value::object([("tools", Value::Array(page))]);
+            if start + page_size < all.len() {
+                result.set("nextCursor", Value::String((start + page_size).to_string()));
+            }
+            Ok(result)
+        }
+        "tools/call" => {
+            let name = params
+                .and_then(|p| p.get("name"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            locked(&ran).push(name.to_lowercase());
+            Ok(Value::object([(
+                "content",
+                Value::Array(vec![Value::object([
+                    ("type", Value::str("text")),
+                    ("text", Value::str("ran")),
+                ])]),
+            )]))
+        }
+        _ => Err(UpstreamError::Timeout),
+    })
+}
+
+fn names(list: &[&str]) -> Arc<std::sync::Mutex<Vec<String>>> {
+    Arc::new(std::sync::Mutex::new(
+        list.iter().map(|s| (*s).to_string()).collect(),
+    ))
+}
+
+fn deny_send_policy() -> ToolPolicy {
+    ToolPolicy {
+        allow: globs(&["*"]),
+        deny: globs(&["send_*"]),
+        read_only: false,
+        read_patterns: default_read_patterns(),
+        rules: vec![],
+    }
+}
+
+#[test]
+fn a_name_variant_that_dodges_the_denylist_is_not_forwarded() {
+    // the server would run "Send_Message" as send_message, but it does not list that name
+    let ran = names(&[]);
+    let r = rig_with(
+        config(),
+        deny_send_policy(),
+        lenient_server(names(&["send_message", "get_chats"]), ran.clone(), 100),
+    );
+    assert_eq!(
+        error_code(
+            &r.gateway
+                .handle(&post(Some(&r.full_token), &call("send_message", "{}")))
+        ),
+        jsonrpc::FORBIDDEN,
+        "the exact name is on the denylist"
+    );
+    for variant in ["Send_Message", "SEND_MESSAGE", "sEnd_messagE"] {
+        let resp = r
+            .gateway
+            .handle(&post(Some(&r.full_token), &call(variant, "{}")));
+        assert_eq!(error_code(&resp), jsonrpc::INVALID_PARAMS, "{variant}");
+        assert_eq!(r.audit.records().last().unwrap().reason, "tool_not_listed");
+    }
+    assert!(
+        locked(&ran).is_empty(),
+        "no variant reached the server: {:?}",
+        locked(&ran)
+    );
+    // a listed, allowed tool still works
+    let ok = r
+        .gateway
+        .handle(&post(Some(&r.full_token), &call("get_chats", "{}")));
+    assert!(body(&ok).get("result").is_some());
+    assert_eq!(*locked(&ran), ["get_chats"]);
+}
+
+#[test]
+fn the_tool_list_is_fetched_once_and_reused() {
+    let ran = names(&[]);
+    let r = rig_with(
+        config(),
+        deny_send_policy(),
+        lenient_server(names(&["get_chats", "list_chats"]), ran, 100),
+    );
+    for _ in 0..5 {
+        r.gateway
+            .handle(&post(Some(&r.full_token), &call("get_chats", "{}")));
+    }
+    let lists = r
+        .upstream
+        .calls()
+        .iter()
+        .filter(|(m, _)| m == "tools/list")
+        .count();
+    assert_eq!(lists, 1);
+}
+
+#[test]
+fn an_unknown_name_does_not_make_the_gateway_list_tools_again_and_again() {
+    let ran = names(&[]);
+    let tools = names(&["get_chats"]);
+    let r = rig_with(
+        config(),
+        deny_send_policy(),
+        lenient_server(tools.clone(), ran, 100),
+    );
+    let lists = |r: &Rig| {
+        r.upstream
+            .calls()
+            .iter()
+            .filter(|(m, _)| m == "tools/list")
+            .count()
+    };
+    for _ in 0..20 {
+        r.gateway
+            .handle(&post(Some(&r.full_token), &call("nonexistent", "{}")));
+    }
+    assert_eq!(lists(&r), 1, "a burst of unknown names costs one listing");
+    // a tool that appears later is found once the refresh interval has passed
+    locked(&tools).push("new_tool".into());
+    let resp = r
+        .gateway
+        .handle(&post(Some(&r.full_token), &call("new_tool", "{}")));
+    assert_eq!(
+        error_code(&resp),
+        jsonrpc::INVALID_PARAMS,
+        "too soon to look again"
+    );
+    r.clock.advance(6_000);
+    let resp = r
+        .gateway
+        .handle(&post(Some(&r.full_token), &call("new_tool", "{}")));
+    assert!(
+        body(&resp).get("result").is_some(),
+        "{}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    assert_eq!(lists(&r), 2);
+}
+
+#[test]
+fn a_cached_list_expires() {
+    let ran = names(&[]);
+    let tools = names(&["get_chats", "old_tool"]);
+    let r = rig_with(
+        config(),
+        deny_send_policy(),
+        lenient_server(tools.clone(), ran.clone(), 100),
+    );
+    assert!(body(
+        &r.gateway
+            .handle(&post(Some(&r.full_token), &call("old_tool", "{}")))
+    )
+    .get("result")
+    .is_some());
+    locked(&tools).retain(|t| t != "old_tool");
+    // still cached
+    assert!(body(
+        &r.gateway
+            .handle(&post(Some(&r.full_token), &call("old_tool", "{}")))
+    )
+    .get("result")
+    .is_some());
+    r.clock.advance(61_000);
+    let resp = r
+        .gateway
+        .handle(&post(Some(&r.full_token), &call("old_tool", "{}")));
+    assert_eq!(
+        error_code(&resp),
+        jsonrpc::INVALID_PARAMS,
+        "a removed tool is gone after the cache expired"
+    );
+}
+
+#[test]
+fn the_tool_list_is_read_across_pages() {
+    let ran = names(&[]);
+    let many: Vec<String> = (0..25).map(|i| format!("tool_{i}")).collect();
+    let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+    let r = rig_with(
+        config(),
+        deny_send_policy(),
+        lenient_server(names(&refs), ran, 10),
+    );
+    let resp = r
+        .gateway
+        .handle(&post(Some(&r.full_token), &call("tool_24", "{}")));
+    assert!(
+        body(&resp).get("result").is_some(),
+        "{}",
+        String::from_utf8_lossy(&resp.body)
+    );
+    let lists = r
+        .upstream
+        .calls()
+        .iter()
+        .filter(|(m, _)| m == "tools/list")
+        .count();
+    assert_eq!(lists, 3);
+}
+
+#[test]
+fn a_server_that_cannot_list_its_tools_means_no_call() {
+    let r = rig_with(
+        config(),
+        deny_send_policy(),
+        FakeUpstream::new(|_, _| Err(UpstreamError::Unavailable("gone".into()))),
+    );
+    let resp = r
+        .gateway
+        .handle(&post(Some(&r.full_token), &call("get_chats", "{}")));
+    assert_eq!(resp.status, 503);
+    assert!(
+        r.audit
+            .records()
+            .iter()
+            .all(|rec| rec.outcome != Outcome::Started),
+        "no intent: the call was never forwarded"
+    );
+}
+
+#[test]
+fn the_listing_is_not_asked_for_a_tool_the_policy_already_refused() {
+    let ran = names(&[]);
+    let r = rig_with(
+        config(),
+        deny_send_policy(),
+        lenient_server(names(&["send_message"]), ran, 100),
+    );
+    r.gateway
+        .handle(&post(Some(&r.full_token), &call("send_message", "{}")));
+    assert!(r.upstream.calls().is_empty());
 }

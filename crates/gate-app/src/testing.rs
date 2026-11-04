@@ -194,6 +194,30 @@ impl FakeUpstream {
         })
     }
 
+    /// A server that lists the given tools and answers every other request with `handler`.
+    pub fn listing(
+        names: &[&str],
+        handler: impl Fn(&str, Option<&Value>) -> Result<Value, UpstreamError> + Send + Sync + 'static,
+    ) -> FakeUpstream {
+        let listed = FakeUpstream::with_tools(names);
+        FakeUpstream::new(move |method, params| {
+            if method == "tools/list" {
+                listed.request(method, params.cloned(), 0)
+            } else {
+                handler(method, params)
+            }
+        })
+    }
+
+    /// The `tools/call` requests that reached the upstream, in order.
+    pub fn tool_calls(&self) -> Vec<Option<Value>> {
+        lock(&self.calls)
+            .iter()
+            .filter(|(method, _)| method == "tools/call")
+            .map(|(_, params)| params.clone())
+            .collect()
+    }
+
     pub fn set_info(&self, info: Result<ChildInfo, UpstreamError>) {
         *lock(&self.info) = info;
     }
